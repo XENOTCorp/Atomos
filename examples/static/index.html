@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATOMOS</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#000;color:#c8cdd3;font:13px/1.5 ui-sans-serif,system-ui,sans-serif;min-height:100%}
+body{max-width:720px;margin:0 auto;padding:28px 20px 72px}
+.metal{
+  font-weight:600;letter-spacing:.22em;text-transform:uppercase;font-size:18px;
+  background:linear-gradient(105deg,#5c5c5c 0%,#cfcfcf 18%,#f7f7f7 36%,#9a9a9a 50%,#ececec 64%,#7a7a7a 82%,#d8d8d8 100%);
+  background-size:280% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;
+  animation:metal 16s linear infinite;
+}
+@keyframes metal{0%{background-position:0% 50%}100%{background-position:200% 50%}}
+h1{font-size:11px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:#8b9096;margin:28px 0 14px}
+p,li{color:#c5ccd3}
+ul{margin:0;padding:0;list-style:none;border:1px solid #1a1a1a}
+li{padding:10px 14px;border-bottom:1px solid #1a1a1a}
+li:last-child{border-bottom:0}
+li::before{content:"— ";color:#555}
+code{font-family:ui-monospace,monospace;font-size:12px;color:#edeff2}
+.muted{color:#6e7378;font-size:11px;margin-top:28px}
+</style>
+</head>
+<body>
+<div class="metal">ATOMOS</div>
+<h1>Barebones HTTP kernel</h1>
+<p>Disjoint JSON ruleset, modules, pure and effectful atoms, optional operator TUI.</p>
+<ul>
+  <li>Loopback bind, SO_REUSEPORT, TCP_NODELAY</li>
+  <li>httparse + JSON depth scan before serde</li>
+  <li>Static <code>/*</code> except <code>/api/*</code></li>
+  <li>Control socket for refresh / stop / start</li>
+</ul>
+<p class="muted">Default listen 127.0.0.1:8090 · XENOT</p>
+</body>
+</html>

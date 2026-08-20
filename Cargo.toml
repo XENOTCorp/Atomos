@@ -1,0 +1,73 @@
+[package]
+name = "atomos"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+description = "Barebones HTTP kernel: disjoint JSON rules, modules, atoms, operator TUI."
+publish = false
+
+[lib]
+name = "atomos"
+path = "src/lib.rs"
+
+[[bin]]
+name = "atomos"
+path = "src/bin/serve.rs"
+
+[[bin]]
+name = "atomos-ctl"
+path = "src/bin/ctl.rs"
+required-features = ["tui"]
+
+[[example]]
+name = "static_site"
+path = "examples/static_site.rs"
+
+[[example]]
+name = "echo_api"
+path = "examples/echo_api.rs"
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
+
+[dependencies]
+arc-swap = "1"
+bumpalo = "3"
+bytes = "1"
+crossterm = { version = "0.28", optional = true }
+dtoa = "1"
+hashbrown = "0.15"
+httparse = "1"
+itoa = "1"
+libc = "0.2"
+memmap2 = "0.9"
+parking_lot = "0.12"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.5", features = ["all"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "ansi"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+incremental = false
+panic = "abort"
+
+# Microbenches: opt-3, no LTO. Release stays thin LTO.
+[profile.bench]
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+debug = false

@@ -1,0 +1,214 @@
+//! Generic request/response. Strings on `In` borrow the receive buffer.
+//!
+//! `Out` fields modules may set (examples):
+//! - `status`: `Status::OK` or `Status::NOT_FOUND`
+//! - `reason`: None → RFC phrase; Some only to override
+//! - `headers`: extra Content-Type, ETag
+//! - `body`: Raw for files, Json for APIs (already serialized)
+//! - `cache`: No (default) | Global { ttl_ms } | Named { id, ttl_ms }
+//! - `flags`: passed to post-module (`FLAG_LOG`, `FLAG_METRICS_SKIP`, `FLAG_NO_POST`)
+
+use std::net::SocketAddr;
+
+use bytes::Bytes;
+
+use crate::flags::FlagSet;
+use crate::status::Status;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Head,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    Options,
+    Trace,
+    Connect,
+}
+
+impl Method {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "GET" => Method::Get,
+            "HEAD" => Method::Head,
+            "POST" => Method::Post,
+            "PUT" => Method::Put,
+            "DELETE" => Method::Delete,
+            "PATCH" => Method::Patch,
+            "OPTIONS" => Method::Options,
+            "TRACE" => Method::Trace,
+            "CONNECT" => Method::Connect,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Head => "HEAD",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+            Method::Patch => "PATCH",
+            Method::Options => "OPTIONS",
+            Method::Trace => "TRACE",
+            Method::Connect => "CONNECT",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HeaderView<'buf> {
+    pub pairs: Vec<(&'buf str, &'buf str)>,
+}
+
+impl<'buf> HeaderView<'buf> {
+    pub fn get(&self, name: &str) -> Option<&'buf str> {
+        self.pairs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| *v)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Body<'buf> {
+    Empty,
+    Raw(&'buf [u8]),
+    /// First-byte `{` or `[` passed; depth/size already checked.
+    Json(&'buf [u8]),
+}
+
+/// Domain: one HTTP request whose bytes still live in `buf`.
+/// Invariant: path/query/headers/body borrow `buf`.
+pub struct In<'buf> {
+    pub method: Method,
+    pub path: &'buf str,
+    pub query: &'buf str,
+    pub headers: HeaderView<'buf>,
+    pub body: Body<'buf>,
+    pub peer: SocketAddr,
+    pub flags: FlagSet,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutBody {
+    Empty,
+    Raw(Bytes),
+    Json(Bytes),
+}
+
+impl OutBody {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            OutBody::Empty => b"",
+            OutBody::Raw(b) | OutBody::Json(b) => b,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CacheDirective {
+    No,
+    Global { ttl_ms: u32 },
+    Named { ruleset: Box<str>, ttl_ms: u32 },
+}
+
+/// Domain: one module result. See module docs for field examples.
+#[derive(Clone, Debug)]
+pub struct Out {
+    pub status: Status,
+    pub reason: Option<Box<str>>,
+    pub headers: Vec<(Box<str>, Box<str>)>,
+    pub body: OutBody,
+    pub cache: CacheDirective,
+    pub flags: FlagSet,
+}
+
+impl In<'_> {
+    pub fn to_owned(&self) -> InOwned {
+        let body = match self.body {
+            Body::Empty => Vec::new(),
+            Body::Raw(b) | Body::Json(b) => b.to_vec(),
+        };
+        InOwned {
+            method: self.method,
+            path: self.path.to_string(),
+            query: self.query.to_string(),
+            headers: self
+                .headers
+                .pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            body,
+            peer: self.peer,
+            flags: self.flags,
+        }
+    }
+}
+
+impl InOwned {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+impl Out {
+    pub fn empty(status: Status) -> Self {
+        Self {
+            status,
+            reason: None,
+            headers: Vec::new(),
+            body: OutBody::Empty,
+            cache: CacheDirective::No,
+            flags: FlagSet::empty(),
+        }
+    }
+
+    pub fn raw(status: Status, body: Bytes, content_type: &str) -> Self {
+        Self {
+            status,
+            reason: None,
+            headers: vec![("Content-Type".into(), content_type.into())],
+            body: OutBody::Raw(body),
+            cache: CacheDirective::No,
+            flags: FlagSet::empty(),
+        }
+    }
+
+    pub fn json(status: Status, body: Bytes) -> Self {
+        Self {
+            status,
+            reason: None,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: OutBody::Json(body),
+            cache: CacheDirective::No,
+            flags: FlagSet::empty(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct InOwned {
+    pub method: Method,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub peer: SocketAddr,
+    pub flags: FlagSet,
+}

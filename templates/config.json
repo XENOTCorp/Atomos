@@ -1,0 +1,20 @@
+{
+  "bind": "127.0.0.1:8090",
+  "allow_non_loopback": false,
+  "workers": 2,
+  "tcp_nodelay": true,
+  "tcp_fastopen": false,
+  "so_reuseport": true,
+  "max_body_bytes": 262144,
+  "max_json_depth": 32,
+  "memory_cap_bytes": 67108864,
+  "memory_mode": "hard",
+  "cache_entries": 4096,
+  "cache_bytes": 16777216,
+  "pre_module": null,
+  "post_module": null,
+  "rules_path": "rules.json",
+  "control_socket": "/tmp/atomos.sock",
+  "static_root": "static",
+  "error_page": "templates/error.html"
+}
