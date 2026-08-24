@@ -1,9 +1,10 @@
-//! atomos-ctl — operator TUI. Separate process from the HTTP server.
+//! atomos-ctl — operator CLI / JSON API. Separate process from the HTTP server.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use atomos::config::Config;
-use atomos::tui;
+use atomos::ctl::{self, Env};
 
 fn default_config() -> PathBuf {
     std::env::var("ATOMOS_CONFIG")
@@ -11,14 +12,8 @@ fn default_config() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("config.json"))
 }
 
-fn arg(args: &[String], name: &str) -> Option<String> {
-    args.windows(2).find_map(|w| {
-        if w[0] == name {
-            Some(w[1].clone())
-        } else {
-            None
-        }
-    })
+fn looks_like_path(s: &str) -> bool {
+    s.contains('/') || s.ends_with(".json") || s.starts_with('.')
 }
 
 fn main() {
@@ -28,7 +23,7 @@ fn main() {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."));
         let target = std::env::current_exe().expect("exe");
-        match tui::install_link(&home, &target) {
+        match ctl::install_link(&home, &target) {
             Ok(p) => println!("{}", p.display()),
             Err(e) => {
                 eprintln!("{e}");
@@ -37,10 +32,67 @@ fn main() {
         }
         return;
     }
-    let path = arg(&args, "--config")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_config);
-    let cfg = if path.exists() {
+
+    let mut json = false;
+    let mut config: Option<PathBuf> = None;
+    let mut data: Option<PathBuf> = None;
+    let mut socket: Option<PathBuf> = None;
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {
+                // Old flag: `--json FILE` was the CRUD path. New flag: JSON-lines mode.
+                if let Some(next) = args.get(i + 1) {
+                    if looks_like_path(next) && !next.starts_with('-') {
+                        i += 1;
+                        data = Some(PathBuf::from(&args[i]));
+                        continue;
+                    }
+                }
+                json = true;
+            }
+            "--data" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => data = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--data needs a path");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--config" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => config = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--config needs a path");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--socket" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => socket = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--socket needs a path");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "-h" | "--help" => {
+                words.clear();
+                words.push("help".into());
+            }
+            other => words.push(other.to_string()),
+        }
+        i += 1;
+    }
+
+    let path = config.unwrap_or_else(default_config);
+    let mut cfg = if path.exists() {
         Config::load_path(&path).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);
@@ -48,13 +100,14 @@ fn main() {
     } else {
         Config::from_json(br#"{"bind":"127.0.0.1:8090"}"#).expect("cfg")
     };
-    let json = arg(&args, "--json")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("data.json"));
-    if let Err(e) = tui::run_tui(&cfg, json) {
-        eprintln!("{e}");
-        std::process::exit(1);
+    if let Some(s) = socket {
+        cfg.control_socket = s;
     }
+    let data_path = data.unwrap_or_else(|| PathBuf::from("data.json"));
+
+    let env = Env { cfg, data_path };
+    let tty = std::io::stdin().is_terminal();
+    std::process::exit(ctl::run_cli(&env, &words, json, tty));
 }
 
 #[cfg(test)]

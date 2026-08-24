@@ -1,8 +1,9 @@
 # Performance and bounds
 
 Release: `opt-level=3`, thin LTO, `codegen-units=1`, `panic=abort`, strip.
-Linker: lld, RELRO, now, noexecstack. `target-cpu=native` (Broadwell on XENOT
-compute: AVX2 only, no AVX-512).
+Linker: lld, RELRO, now, noexecstack. CPU flags come from
+`scripts/cpu-rustflags.sh` / `scripts/atomos-host.sh` (`target-cpu=native`
+plus features advertised in `/proc/cpuinfo`).
 
 ## Hard bounds (config)
 
@@ -13,7 +14,6 @@ compute: AVX2 only, no AVX-512).
 | Body | 262144 bytes |
 | Response cache | 4096 entries / 16 MiB in the example |
 | Rules | 256 max |
-| Request bumpalo | 4096 bytes |
 
 Governor: `memory_mode` `hard` → HTTP 503 over cap; `degrade` → `FLAG_DEGRADED`.
 
@@ -28,12 +28,29 @@ Hot path: `itoa` / `dtoa` into stack buffers. JSON **output** uses a thread-loca
 |---|---|
 | simd-json vs serde_json (typical 56 B) | serde faster |
 | tokio-uring vs tokio | tokio p99 better; uring `!Sync` |
-| bumpalo serialize | slower than thread-local Vec |
+| bumpalo serialize (not shipped) | slower than thread-local Vec |
 | AVX2 lowercase-then-tokenize | slower than scalar |
-| QUIC | skip: TLS already at cloudflared |
+| QUIC / HTTP/3 | shipped (UDP same port; ~5k rps on this 2-core — crypto bound) |
 | `.so` module reload | skip: JSON ruleset reload is enough |
 
-Empty static site RSS ≈ 3 MiB (bound 64 MiB).
+Empty static site RSS ≈ 3 MiB (bound 64 MiB). first_app with H2+H3 idle
+≈ 4.4 MiB, peak HWM 9.3 MiB after mixed load.
+
+Load test of `examples/first_app` (release, loopback, 2026-08-21, **epoll H1**,
+4 pinned workers, proto not in-process):
+
+- **HTTP/1.1** `GET /api/health`: 1×p1 **36k** (~28 µs mean); 4×p1 **71k**;
+  8×p8 **239k**; 16×p16 **282k**. Notes 8×p8 **232k**. err=0. RSS **~3.2 MiB**.
+- Same day, tokio+h2+h3 sharing those cores was 16×p16 **143k** — proto coproduct
+  is the rps delta.
+- **h2c** / **TLS h2** / **HTTP/3** remain on `atomos-proto` (~36k / ~39k / ~5.3k).
+- Python `http.client` was client-bound at ~2–3k rps — do not use it for rps.
+
+Full tables: [bench-first-app.md](bench-first-app.md).
+
+Hot path: pinned current-thread workers, one `write_all` per H1 response,
+parse borrows the receive buffer, `SO_REUSEPORT` accept, H1 encoded-byte
+cache, H2/H3 semantic `Out` cache, sync `Module` when nothing awaits.
 
 Benches use `[profile.bench]` **without LTO** so `cargo bench` stays fast.
 
@@ -43,3 +60,10 @@ Benches use `[profile.bench]` **without LTO** so `cargo bench` stays fast.
 2. Warm a bounded prefix, then one synthetic request.
 3. Keep-alive + `CacheDirective::Global` on static.
 4. Upstream work on a bounded channel behind token buckets.
+
+## Ceilings that are not Atomos
+
+On this class of host, further rps is **kernel TCP + mitigations + core count**,
+then **TLS/QUIC crypto**, then **the reverse proxy**. io_uring, simd-json, and
+software prefetch were measured and rejected. Do not add a userspace NIC stack
+inside this crate. Generate host facts with `scripts/atomos-host.sh write`.

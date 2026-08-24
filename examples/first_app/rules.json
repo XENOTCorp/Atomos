@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "id": "static",
+      "module": "static",
+      "methods": ["GET", "HEAD"],
+      "include": ["/*"],
+      "exclude": ["/api/*"]
+    },
+    {
+      "id": "api",
+      "module": "api",
+      "methods": ["GET", "POST"],
+      "include": ["/api/*"],
+      "exclude": []
+    }
+  ]
+}

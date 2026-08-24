@@ -27,13 +27,14 @@ appends). Files > 8 MiB → `AtomError::Bound`. Writes are tmp + rename.
 
 ```
 server.restart  = ["server.stop", "server.start"]
-tui.dashboard   = ["signal.get", "resource.get"]
+ops.dashboard   = ["signal.get", "resource.get"]
 ```
 
 Add more in the consumer (`templates/molecule.rs`).
 
 ## Control socket
 
-Unix datagram-style JSON lines, mode 0600. Commands: `status`,
+Unix stream JSON lines, mode 0600. Commands: `status`,
 `refresh-endpoints` / `rules.reload`, `stop`, `start`, `restart`,
-`dry-test-rules`. Default path `/tmp/atomos.sock`.
+`dry-test-rules`. Default path `/tmp/atomos.sock`. The operator binary is
+`atomos-ctl` (`>` prompt / `--json` lines). See [first-web-app.md](first-web-app.md).

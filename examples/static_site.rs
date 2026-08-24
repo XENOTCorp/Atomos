@@ -4,7 +4,7 @@ use atomos::config::Config;
 use atomos::rules::Ruleset;
 use atomos::{serve, static_router};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let root = std::env::args()
         .nth(1)

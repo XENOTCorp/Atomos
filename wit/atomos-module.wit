@@ -1,0 +1,32 @@
+package atomos:module@0.1.0;
+
+/// Sandboxed hot-swap ABI. Host grants no filesystem unless a future cap is added.
+/// Cache hits never enter this world.
+
+interface handler {
+  record header {
+    name: string,
+    value: string,
+  }
+
+  record request {
+    method: string,
+    path: string,
+    query: string,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  record response {
+    status: u16,
+    headers: list<header>,
+    body: list<u8>,
+    cache-ttl-ms: u32,
+  }
+
+  handle: func(req: request) -> result<response, string>;
+}
+
+world module {
+  export handler;
+}

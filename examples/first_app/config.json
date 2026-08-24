@@ -1,0 +1,13 @@
+{
+  "bind": "127.0.0.1:8090",
+  "allow_non_loopback": false,
+  "memory_cap_bytes": 67108864,
+  "cache_entries": 256,
+  "cache_bytes": 1048576,
+  "pre_module": "pre",
+  "post_module": "post",
+  "rules_path": "examples/first_app/rules.json",
+  "control_socket": "/tmp/atomos-first.sock",
+  "static_root": "examples/first_app/static",
+  "error_page": "examples/first_app/static/error.html"
+}

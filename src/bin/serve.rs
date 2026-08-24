@@ -1,11 +1,13 @@
-//! atomos — static (and registered) HTTP server. Loopback by default.
+//! atomos — HTTP/1.1 origin (epoll). Loopback by default. Use atomos-proto for H2/H3.
 
 use std::path::PathBuf;
 
 use atomos::config::Config;
-use atomos::control;
+use atomos::control_std;
+use atomos::engine::EngineKind;
+use atomos::epoll;
 use atomos::rules::Ruleset;
-use atomos::{serve, static_router};
+use atomos::static_router;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.windows(2).find_map(|w| {
@@ -23,8 +25,7 @@ fn default_config() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("config.json"))
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -37,7 +38,7 @@ async fn main() {
         || args.first().map(String::as_str) == Some("--help")
     {
         eprintln!(
-            "atomos [--config FILE] [--bind HOST:PORT] [--root DIR] [--rules FILE]\nDefault bind 127.0.0.1:8090. Does not bind 8082."
+            "atomos [--config FILE] [--bind HOST:PORT] [--root DIR] [--rules FILE]\nHTTP/1.1 epoll. Default bind 127.0.0.1:8090. Host overlay: ATOMOS_HOST or .atomos/host.json.\nH2/H3: atomos-proto."
         );
         std::process::exit(0);
     }
@@ -51,7 +52,9 @@ async fn main() {
             std::process::exit(1);
         })
     } else {
-        Config::from_json(br#"{"bind":"127.0.0.1:8090"}"#).expect("default config")
+        let mut c = Config::from_json(br#"{"bind":"127.0.0.1:8090"}"#).expect("default config");
+        c.apply_host_file();
+        c
     };
     if let Some(b) = arg(&args, "--bind") {
         cfg.bind = b;
@@ -82,15 +85,20 @@ async fn main() {
         .expect("builtin rules")
     };
 
+    let kind = EngineKind::parse(&cfg.engine).unwrap_or_default();
+    if kind != EngineKind::Epoll {
+        eprintln!("atomos is the H1 binary; use atomos-proto for engine=tokio");
+        std::process::exit(1);
+    }
     let sock = cfg.control_socket.clone();
     let (router, ctx, _) = static_router(cfg, rules);
     let ctl = ctx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = control::serve_control(sock, ctl).await {
+    std::thread::spawn(move || {
+        if let Err(e) = control_std::serve_control(sock, ctl) {
             tracing::warn!(%e, "control socket");
         }
     });
-    if let Err(e) = serve::run(router, ctx).await {
+    if let Err(e) = epoll::run(router, ctx) {
         eprintln!("{e}");
         std::process::exit(1);
     }

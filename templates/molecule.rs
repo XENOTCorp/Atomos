@@ -15,8 +15,8 @@ pub const BACKUP_THEN_DRY: Molecule = Molecule {
     steps: &["settings.backup", "rules.dry_test"],
 };
 
-/// Example: TUI status pane.
+/// Example: status pane (CLI / JSON).
 pub const DASHBOARD: Molecule = Molecule {
-    name: "tui.dashboard",
+    name: "ops.dashboard",
     steps: &["signal.get", "resource.get"],
 };

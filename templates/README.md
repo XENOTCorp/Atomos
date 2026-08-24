@@ -17,3 +17,6 @@ Copy these into a **consumer** crate. They are not compiled as part of `atomos`.
 
 Hot-reload of `.rs` is not supported. Reload **JSON** rules with the control
 command `refresh-endpoints` (`rules.reload` atom).
+
+Worked first app: [docs/first-web-app.md](../docs/first-web-app.md) and
+`examples/first_app.rs`.

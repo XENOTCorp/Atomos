@@ -28,7 +28,7 @@ impl AsyncModule for Echo {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let root = std::env::args().nth(1).unwrap_or_else(|| "examples/static".into());
     let bind = std::env::args()
@@ -48,14 +48,8 @@ async fn main() {
         ]}"#,
     )
     .expect("rules");
-    let (mut router, ctx, _) = static_router(cfg, rules);
-    {
-        let r = Arc::get_mut(&mut router).expect("unique");
-        r.modules.insert(
-            "api".into(),
-            Handler::Async(Arc::new(Echo)),
-        );
-    }
+    let (router, ctx, _) = static_router(cfg, rules);
+    router.insert("api", Handler::Async(Arc::new(Echo)));
     if let Err(e) = serve::run(router, ctx).await {
         eprintln!("{e}");
         std::process::exit(1);

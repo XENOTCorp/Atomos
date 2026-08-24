@@ -1,4 +1,5 @@
 /target
+.atomos/
 **/*.rs.bk
 *.swp
 .DS_Store
