@@ -18,6 +18,21 @@ pub struct Metrics {
     pub hits: LineAtomicU64,
     pub misses: LineAtomicU64,
     pub bytes_out: LineAtomicU64,
+    // Tokio H2/H3 datapath observability (the `h2`/`h3` crates hide
+    // HPACK/QPACK internals, so these are measured at the app boundary:
+    // raw header bytes per request are exact; wire bytes per connection
+    // come from a counting IO wrapper and make a compression proxy).
+    pub h2_conns: LineAtomicU64,
+    pub h2_streams: LineAtomicU64,
+    pub h2_headers_raw: LineAtomicU64,
+    pub h2_body_in: LineAtomicU64,
+    pub h2_rst: LineAtomicU64,
+    pub h2_wire_in: LineAtomicU64,
+    pub h2_wire_out: LineAtomicU64,
+    pub h3_conns: LineAtomicU64,
+    pub h3_streams: LineAtomicU64,
+    pub h3_headers_raw: LineAtomicU64,
+    pub h3_body_in: LineAtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +41,17 @@ pub struct Snapshot {
     pub hits: u64,
     pub misses: u64,
     pub bytes_out: u64,
+    pub h2_conns: u64,
+    pub h2_streams: u64,
+    pub h2_headers_raw: u64,
+    pub h2_body_in: u64,
+    pub h2_rst: u64,
+    pub h2_wire_in: u64,
+    pub h2_wire_out: u64,
+    pub h3_conns: u64,
+    pub h3_streams: u64,
+    pub h3_headers_raw: u64,
+    pub h3_body_in: u64,
 }
 
 impl Metrics {
@@ -35,6 +61,17 @@ impl Metrics {
             hits: LineAtomicU64::new(0),
             misses: LineAtomicU64::new(0),
             bytes_out: LineAtomicU64::new(0),
+            h2_conns: LineAtomicU64::new(0),
+            h2_streams: LineAtomicU64::new(0),
+            h2_headers_raw: LineAtomicU64::new(0),
+            h2_body_in: LineAtomicU64::new(0),
+            h2_rst: LineAtomicU64::new(0),
+            h2_wire_in: LineAtomicU64::new(0),
+            h2_wire_out: LineAtomicU64::new(0),
+            h3_conns: LineAtomicU64::new(0),
+            h3_streams: LineAtomicU64::new(0),
+            h3_headers_raw: LineAtomicU64::new(0),
+            h3_body_in: LineAtomicU64::new(0),
         }
     }
 
@@ -44,6 +81,17 @@ impl Metrics {
             hits: self.hits.v.load(Ordering::Relaxed),
             misses: self.misses.v.load(Ordering::Relaxed),
             bytes_out: self.bytes_out.v.load(Ordering::Relaxed),
+            h2_conns: self.h2_conns.v.load(Ordering::Relaxed),
+            h2_streams: self.h2_streams.v.load(Ordering::Relaxed),
+            h2_headers_raw: self.h2_headers_raw.v.load(Ordering::Relaxed),
+            h2_body_in: self.h2_body_in.v.load(Ordering::Relaxed),
+            h2_rst: self.h2_rst.v.load(Ordering::Relaxed),
+            h2_wire_in: self.h2_wire_in.v.load(Ordering::Relaxed),
+            h2_wire_out: self.h2_wire_out.v.load(Ordering::Relaxed),
+            h3_conns: self.h3_conns.v.load(Ordering::Relaxed),
+            h3_streams: self.h3_streams.v.load(Ordering::Relaxed),
+            h3_headers_raw: self.h3_headers_raw.v.load(Ordering::Relaxed),
+            h3_body_in: self.h3_body_in.v.load(Ordering::Relaxed),
         }
     }
 }
@@ -72,12 +120,23 @@ impl Module for MetricsMod {
 
     fn handle(&self, _req: &In<'_>) -> Result<Out, ServeError> {
         let s = self.metrics.snapshot();
-        let mut body = Vec::with_capacity(128);
+        let mut body = Vec::with_capacity(256);
         let mut nbuf = [0u8; 20];
         push_metric(&mut body, b"atomos_requests ", s.requests, &mut nbuf);
         push_metric(&mut body, b"atomos_cache_hits ", s.hits, &mut nbuf);
         push_metric(&mut body, b"atomos_cache_misses ", s.misses, &mut nbuf);
         push_metric(&mut body, b"atomos_bytes_out ", s.bytes_out, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_conns ", s.h2_conns, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_streams ", s.h2_streams, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_headers_raw ", s.h2_headers_raw, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_body_in ", s.h2_body_in, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_rst ", s.h2_rst, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_wire_in ", s.h2_wire_in, &mut nbuf);
+        push_metric(&mut body, b"atomos_h2_wire_out ", s.h2_wire_out, &mut nbuf);
+        push_metric(&mut body, b"atomos_h3_conns ", s.h3_conns, &mut nbuf);
+        push_metric(&mut body, b"atomos_h3_streams ", s.h3_streams, &mut nbuf);
+        push_metric(&mut body, b"atomos_h3_headers_raw ", s.h3_headers_raw, &mut nbuf);
+        push_metric(&mut body, b"atomos_h3_body_in ", s.h3_body_in, &mut nbuf);
         Ok(Out {
             status: Status::OK,
             reason: None,
