@@ -48,6 +48,23 @@ Load test of `examples/first_app` (release, loopback, 2026-08-21, **epoll H1**,
 
 Full tables: [bench-first-app.md](bench-first-app.md).
 
+**FDS-backed epoll H1** (wrk, 2026-08-24, same laptop — the engine now
+runs on fds-core's reactor/conn-table; release, 4 pinned workers,
+HTTP/1.1 keep-alive):
+
+| Workload | Result |
+|---|---|
+| 18 B static page (wire-cache hit), 4×100 conns | **86.5k req/s**, 1.22 ms avg |
+| 64 KB static file (wire-cache hit), 4×100 conns | **23.5k req/s = 1.44 GB/s** |
+| 18 B page, 4×500 conns (stress) | **81.3k req/s**, 4.46 ms avg, 0 socket errors; server healthy after |
+| 404 (uncached full rules→dispatch→error-page), 4×100 | 24.1k req/s, 4.29 ms avg |
+
+The old 2026-08-21 first_app rows are a module-dispatch workload on the
+hand-rolled epoll; the wrk rows are the wire-cache static path on FDS —
+different costs, same machine. FDS transport ceilings for context:
+`--bench-large` 60 KB one-way 36.2/33.2 Gbps; iperf3 loopback TCP
+20–29.7 Gbps; see FDS `docs/engine.md` "Cross-tool benchmarks".
+
 Hot path: pinned current-thread workers, one `write_all` per H1 response,
 parse borrows the receive buffer, `SO_REUSEPORT` accept, H1 encoded-byte
 cache, H2/H3 semantic `Out` cache, sync `Module` when nothing awaits.
