@@ -5,6 +5,25 @@
 //!
 //! JSON in: `req.body` already passed the depth/size scan. Parse with serde.
 //! JSON out: `atomos::json_out::to_bytes` (thread-local buffer).
+//!
+//! ## Datapath notes for endpoint authors (guidance, not compiled)
+//!
+//! - **Allocators (jemalloc / mimalloc)** only reach the control path:
+//!   this engine preallocates at startup and allocates nothing per
+//!   request, so an allocator swap cannot speed up the hot loop. It
+//!   changes control-path behavior (large responses, many headers). To
+//!   opt in, in your **binary crate**:
+//!   ```rust,ignore
+//!   // [dependencies] jemallocator = "0.5"   // or mimalloc = "0.1"
+//!   #[global_allocator]
+//!   static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+//!   ```
+//! - **Lock-free handoff**: async endpoints are the exception — they can
+//!   use `tokio::sync::mpsc` (unbounded/`mpsc` with backpressure)
+//!   between the worker and your await point. For CPU-bound fan-out
+//!   prefer `crossbeam-channel` or atomics + a fixed ring. Never take a
+//!   std `Mutex` across an `.await` (not `Send`); use `parking_lot` on
+//!   the control path only.
 
 use atomos::error::ServeError;
 use atomos::io::{InOwned, Out};

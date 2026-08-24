@@ -4,6 +4,17 @@
 //! Otherwise set `req.flags` via the returned `Out.flags` (the router copies
 //! them onto the request). Keep this RAM-resident; name it in config
 //! `"pre_module": "pre"`.
+//!
+//! ## Datapath notes (guidance, not compiled)
+//!
+//! - The H1 datapath allocates nothing per request; keep this module the
+//!   same (borrow `req`, avoid `String`/`Vec` per call). jemalloc /
+//!   mimalloc swaps only affect the control path — see `module_sync.rs`
+//!   for the `#[global_allocator]` pattern.
+//! - Lock-free: if you gate on a shared rate-limiter / token bucket, use
+//!   atomics or `crossbeam-channel`; a `parking_lot` mutex is acceptable
+//!   on the control path but never inside `handle()` (run-to-completion
+//!   — a blocked pre-module stalls the worker).
 
 use atomos::error::ServeError;
 use atomos::flags::{FlagSet, FLAG_LOG};

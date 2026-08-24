@@ -5,6 +5,15 @@
 //! headers; non-empty body replaces the module body; non-200 replaces status.
 //! Skip with `FLAG_NO_POST`. Config: `"post_module": "post"` (you still set
 //! `router.post`).
+//!
+//! ## Datapath notes (guidance, not compiled)
+//!
+//! - Keep this module allocation-free per call (it runs on the same
+//!   per-core run-to-completion loop as the datapath). jemalloc/mimalloc
+//!   opt-in and the lock-free handoff patterns live in `module_sync.rs`.
+//! - If the post-module feeds observability (logging, metrics fan-out),
+//!   push through a bounded lock-free channel (`crossbeam-channel`) or
+//!   atomics; never block the worker on a mutex.
 
 use atomos::error::ServeError;
 use atomos::io::{In, Out};

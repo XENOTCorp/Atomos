@@ -10,6 +10,31 @@
 //!
 //! Register: `modules.insert("home", Handler::Sync(Arc::new(Home)));`
 //! Bind it in `rules.json` with a disjoint include/exclude.
+//!
+//! ## Datapath notes for endpoint authors (guidance, not compiled)
+//!
+//! - **Allocators (jemalloc / mimalloc)** only reach the control path.
+//!   The H1 datapath (atomos epoll on fds-core) preallocates at startup
+//!   and allocates nothing per request, so swapping the allocator cannot
+//!   speed up the hot loop — it changes control-path / connection-setup
+//!   behavior, which matters for endpoints that build large responses.
+//!   To opt in, in your **binary crate** (never in a module — one
+//!   `#[global_allocator]` per process):
+//!   ```rust,ignore
+//!   // [dependencies] jemallocator = "0.5"   // or mimalloc = "0.1"
+//!   #[global_allocator]
+//!   static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+//!   ```
+//! - **Lock-free handoff** between an endpoint and background workers:
+//!   the kernel datapath is per-core run-to-completion (no locks, no
+//!   channels — `src/net/epoll.rs`). When an endpoint must talk to
+//!   another thread (fan-out, a writer pool), prefer a lock-free channel
+//!   over `Mutex<Vec<...>>`:
+//!   - `crossbeam-channel` (bounded) for one-shot jobs / queues;
+//!   - atomics + a fixed ring for high-rate counters.
+//!   Do NOT take a `Mutex` inside `handle()`: a blocked endpoint stalls
+//!   the whole worker (run-to-completion). If a mutex is unavoidable,
+//!   use `parking_lot` (faster than std, no poison).
 
 use atomos::error::ServeError;
 use atomos::io::{CacheDirective, In, Out, OutBody};
