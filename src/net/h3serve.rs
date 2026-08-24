@@ -111,9 +111,9 @@ where
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
     let mut tx = Some(tx);
     let router2 = router.clone();
-    let head2 = head.clone();
     let max_body = router.cfg.max_body_bytes;
-    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, &head2, peer, rx).await });
+    // `head` is moved into the task (no per-request HeaderMap clone).
+    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, head, peer, rx).await });
     // Run the dispatch task and the body feed concurrently (the recv
     // half is not `Send`, so the feed lives inline here): body chunks
     // reach the module as they arrive, and the task completes when the

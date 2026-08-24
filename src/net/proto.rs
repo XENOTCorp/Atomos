@@ -12,38 +12,40 @@ use crate::parse::{looks_like_json, scan_json};
 use crate::route::Router;
 use crate::status::Status;
 
-pub struct Parts {
+/// Request head, borrowed from the `http::Request` — no per-header
+/// `String` copies on the tokio paths (the H1 path's zero-alloc
+/// discipline applied to H2/H3 dispatch).
+pub struct Parts<'a> {
     pub method: crate::io::Method,
-    pub path: String,
-    pub query: String,
-    pub headers: Vec<(String, String)>,
+    pub path: &'a str,
+    pub query: &'a str,
+    pub headers: Vec<(&'a str, &'a str)>,
     pub body: Bytes,
 }
 
-pub fn parts_from_http(req: http::Request<Bytes>) -> Result<Parts, ServeError> {
+pub fn parts_from_http<'a>(req: &'a http::Request<Bytes>) -> Result<Parts<'a>, ServeError> {
     let method = crate::io::Method::parse(req.method().as_str()).ok_or(ServeError::Parse)?;
     let path = req.uri().path();
-    let path = if path.is_empty() {
-        "/".to_string()
-    } else {
-        path.to_string()
-    };
-    let query = req.uri().query().unwrap_or("").to_string();
+    let path = if path.is_empty() { "/" } else { path };
+    let query = req.uri().query().unwrap_or("");
     let mut headers = Vec::with_capacity(req.headers().len());
     for (k, v) in req.headers() {
+        // h2/h3 HeaderValues are validated on construction; a non-UTF8
+        // value is skipped exactly as the old String-copy path did.
         let Ok(val) = v.to_str() else { continue };
-        headers.push((k.as_str().to_string(), val.to_string()));
+        headers.push((k.as_str(), val));
     }
     Ok(Parts {
         method,
         path,
         query,
         headers,
-        body: req.into_body(),
+        // Bytes clone: refcount bump, not a copy.
+        body: req.body().clone(),
     })
 }
 
-pub async fn dispatch_parts(router: &Router, parts: &Parts, peer: SocketAddr) -> Out {
+pub async fn dispatch_parts(router: &Router, parts: Parts<'_>, peer: SocketAddr) -> Out {
     // Integer scheduler gate (firewall + admission); same policy as the
     // H1 path (`Router::dispatch`). 429 when rejected/backlogged.
     let Some(_guard) = router.admit(peer) else {
@@ -57,23 +59,25 @@ pub async fn dispatch_parts(router: &Router, parts: &Parts, peer: SocketAddr) ->
             return page(router, e.status(), "json");
         }
     }
-    let pairs: Vec<(&str, &str)> = parts
-        .headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let body = if parts.body.is_empty() {
+    let Parts {
+        method,
+        path,
+        query,
+        headers,
+        body,
+    } = parts;
+    let body = if body.is_empty() {
         Body::Empty
-    } else if looks_like_json(&parts.body) {
-        Body::Json(&parts.body)
+    } else if looks_like_json(&body) {
+        Body::Json(&body)
     } else {
-        Body::Raw(&parts.body)
+        Body::Raw(&body)
     };
     let req = In {
-        method: parts.method,
-        path: &parts.path,
-        query: &parts.query,
-        headers: HeaderView { pairs },
+        method,
+        path,
+        query,
+        headers: HeaderView { pairs: headers },
         body,
         peer,
         flags: FlagSet::empty(),
@@ -93,7 +97,7 @@ pub async fn dispatch_parts(router: &Router, parts: &Parts, peer: SocketAddr) ->
 /// and re-validates exactly as before).
 pub async fn stream_dispatch(
     router: &Router,
-    head: &http::request::Parts,
+    head: http::request::Parts,
     peer: SocketAddr,
     body_rx: tokio::sync::mpsc::Receiver<Bytes>,
 ) -> Out {
@@ -102,7 +106,7 @@ pub async fn stream_dispatch(
         let Some(_guard) = router.admit(peer) else {
             return page(router, 429, "scheduler");
         };
-        let req = http::Request::from_parts(head.clone(), ());
+        let req = http::Request::from_parts(head, ());
         match h.handle_streaming(&req, body_rx).await {
             Ok(out) => out,
             Err(e) => page(router, e.status(), "stream"),
@@ -114,11 +118,11 @@ pub async fn stream_dispatch(
         while let Some(c) = rx.recv().await {
             body.extend_from_slice(&c);
         }
-        let req = http::Request::from_parts(head.clone(), body.freeze());
-        let Ok(parts) = parts_from_http(req) else {
+        let req = http::Request::from_parts(head, body.freeze());
+        let Ok(parts) = parts_from_http(&req) else {
             return page(router, 400, "parse");
         };
-        dispatch_parts(router, &parts, peer).await
+        dispatch_parts(router, parts, peer).await
     }
 }
 

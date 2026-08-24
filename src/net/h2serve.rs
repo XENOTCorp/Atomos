@@ -148,9 +148,10 @@ async fn serve_one(
     // streaming module processes data as it comes in.
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
     let router2 = router.clone();
-    let head2 = head.clone();
     let max_body = router.cfg.max_body_bytes;
-    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, &head2, peer, rx).await });
+    // `head` is moved into the task (no per-request HeaderMap clone;
+    // raw_header_bytes above already consumed it).
+    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, head, peer, rx).await });
     let mut feed = tokio::spawn(async move {
         let mut body_len: usize = 0;
         let mut recv = recv;
