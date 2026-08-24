@@ -177,7 +177,9 @@ where
             let body = if matches!(out.body, OutBody::File(_)) {
                 crate::proto::materialize_file_body(&out).await
             } else {
-                Bytes::copy_from_slice(out.body.as_bytes())
+                // Refcount bump, not a copy (the cache already holds
+                // the response body as Bytes).
+                out.body.to_bytes().unwrap_or_default()
             };
             if !body.is_empty() {
                 send_half.send_data(body).await.map_err(h3_err)?;

@@ -190,6 +190,17 @@ impl OutBody {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Cheap owned body bytes when the body is already in memory: the
+    /// `Bytes` clone is a refcount bump, not a copy. `Empty`/`Stream`
+    /// return `None`; `File` returns `None` (materialize it explicitly
+    /// via [`FileBody::read_to_bytes`]).
+    pub fn to_bytes(&self) -> Option<Bytes> {
+        match self {
+            OutBody::Raw(b) | OutBody::Json(b) => Some(b.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

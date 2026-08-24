@@ -241,7 +241,9 @@ async fn serve_one(
                 let body = if matches!(out.body, OutBody::File(_)) {
                     crate::proto::materialize_file_body(&out).await
                 } else {
-                    Bytes::copy_from_slice(out.body.as_bytes())
+                    // Refcount bump, not a copy (the cache already holds
+                    // the response body as Bytes).
+                    out.body.to_bytes().unwrap_or_default()
                 };
                 send.send_data(body, true).map_err(h2_err)?;
             }

@@ -2,6 +2,17 @@
 
 use crate::config::{Config, MemoryMode};
 
+/// RSS is re-read at most this often per worker; memory pressure does
+/// not move at request granularity, and a `/proc/self/status` read is
+/// ~µs — it must not sit on the hot path (measured: ~60% of CPU on the
+/// H2 path before this cache).
+const RSS_TTL: std::time::Duration = std::time::Duration::from_millis(100);
+
+thread_local! {
+    static RSS_CACHE: std::cell::RefCell<Option<(std::time::Instant, u64)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub struct Governor {
     pub cap: u64,
     pub mode: MemoryMode,
@@ -15,8 +26,19 @@ impl Governor {
         }
     }
 
+    /// Cached process RSS (thread-local, 100 ms TTL).
     pub fn rss_bytes() -> u64 {
-        vm_rss_bytes().unwrap_or(0)
+        RSS_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if let Some((at, v)) = *c {
+                if at.elapsed() < RSS_TTL {
+                    return v;
+                }
+            }
+            let v = vm_rss_bytes().unwrap_or(0);
+            *c = Some((std::time::Instant::now(), v));
+            v
+        })
     }
 
     pub fn over_mem(&self) -> bool {
