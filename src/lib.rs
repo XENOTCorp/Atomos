@@ -95,11 +95,7 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
     });
     let sched = {
         let (limits, custom) = cfg.scheduler.build();
-        Arc::new(parking_lot::Mutex::new(crate::sched::Sched::new(
-            cfg.scheduler.mode,
-            custom,
-            limits,
-        )))
+        crate::sched::Sched::sharded(cfg.workers.max(1) as usize, cfg.scheduler.mode, custom, limits)
     };
     let router = Arc::new(Router {
         cache: ResponseCache::new(cfg.cache_entries, cfg.cache_bytes),

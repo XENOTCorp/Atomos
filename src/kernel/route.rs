@@ -28,12 +28,16 @@ pub struct Router {
     pub gov: Governor,
     pub errors: ErrorPage,
     pub metrics: Arc<Metrics>,
-    /// Integer admission scheduler (firewall + bounds + rule-mode
-    /// priority). See `crate::sched`.
-    pub sched: Arc<parking_lot::Mutex<crate::sched::Sched>>,
+    /// Integer admission scheduler shards (firewall + bounds + rule-mode
+    /// priority). See `crate::sched`. Sharded by IP hash so concurrent
+    /// tokio workers don't contend on one mutex.
+    pub sched: Vec<Arc<parking_lot::Mutex<crate::sched::Sched>>>,
 }
 
 impl Router {
+    fn sched_shard(&self, key: u32) -> &Arc<parking_lot::Mutex<crate::sched::Sched>> {
+        &self.sched[(key as usize) % self.sched.len()]
+    }
     pub fn has_async(&self) -> bool {
         self.modules
             .load()
@@ -42,19 +46,16 @@ impl Router {
     }
 
     /// Integer scheduler gate: firewall precondition + admission bounds
-    /// + rule-mode score (see `crate::sched`).
+    /// (see `crate::sched`), routed to the shard for the IP.
     ///
     /// Returns a guard that releases the queue slot on drop, or `None`
-    /// when the request is rejected/backlogged. O(1), integer-only.
+    /// when the request is rejected/backlogged.
     pub fn admit(&self, peer: std::net::SocketAddr) -> Option<crate::sched::ReqGuard> {
         let key = crate::sched::Sched::ip_key(peer);
-        let ok = {
-            let mut s = self.sched.lock();
-            let (outcome, _score) = s.admit_request(key);
-            outcome == crate::sched::Admission::Accepted
-        };
+        let shard = self.sched_shard(key);
+        let ok = shard.lock().admit_request(key) == crate::sched::Admission::Accepted;
         ok.then(|| crate::sched::ReqGuard {
-            sched: self.sched.clone(),
+            sched: shard.clone(),
             key,
         })
     }
@@ -62,9 +63,10 @@ impl Router {
     /// Connection admission for the transport layer (H2/H3 accept).
     pub fn admit_conn(&self, peer: std::net::SocketAddr) -> Option<crate::sched::ConnGuard> {
         let key = crate::sched::Sched::ip_key(peer);
-        let ok = self.sched.lock().admit_conn(key);
+        let shard = self.sched_shard(key);
+        let ok = shard.lock().admit_conn(key);
         ok.then(|| crate::sched::ConnGuard {
-            sched: self.sched.clone(),
+            sched: shard.clone(),
             key,
         })
     }

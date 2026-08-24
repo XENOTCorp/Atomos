@@ -125,14 +125,17 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            c_max: 1000,
-            c_per_ip: 50,
-            q_max: 2000,
-            q_per_ip: 100,
-            b_max: 5000,
+            // Capacity ceilings generous enough for loopback benches
+            // (wrk: 400 connections from one IP); real deployments
+            // tighten via the `scheduler` config block.
+            c_max: 4096,
+            c_per_ip: 1024,
+            q_max: 16_384,
+            q_per_ip: 4096,
+            b_max: 8192,
             h_max: 65_536,
             s_max: 10 << 20,
-            str_max: 1000,
+            str_max: 4096,
             d_limit: DEFAULT_D_LIMIT,
         }
     }
@@ -141,7 +144,7 @@ impl Default for Limits {
 /// Per-IP integer state (all counters, no floats).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IpState {
-    /// Demand estimate (EMA, `(7D + n) >> 3`).
+    /// Demand estimate (EMA, fixed point ×8: `d += n - (d>>3)`).
     pub demand: u32,
     /// Requests currently queued/running for this IP.
     pub queued: u32,
@@ -151,12 +154,16 @@ pub struct IpState {
     pub exception: bool,
     /// Wait ticks of the oldest queued item.
     pub wait_ticks: u32,
-    /// Requests in the current window (1 s).
+    /// Requests in the current window (1 s, rolling decay).
     pub recent: u32,
     /// Incomplete handshakes (SYN without ACK).
     pub syns: u32,
     /// Malformed requests / protocol errors.
     pub errs: u32,
+    /// Set once any firewall feature crosses a low-water mark; the
+    /// admission gate skips the firewall predicate entirely while this
+    /// is clear (the fast/shortcut path — the firewall cannot fail).
+    pub hot: bool,
 }
 
 impl IpState {
@@ -223,6 +230,23 @@ impl Sched {
         }
     }
 
+    /// Sharded scheduler for multi-threaded dispatch: `n` independent
+    /// tables keyed by IP hash, so concurrent workers never contend on
+    /// one mutex. Global limits are divided across shards (each shard
+    /// caps at `q_max/n`, `c_max/n`), a standard sharded-counter
+    /// approximation.
+    pub fn sharded(n: usize, rule: RuleMode, custom: Weights, limits: Limits) -> Vec<Arc<Mutex<Sched>>> {
+        let per_shard = Limits {
+            q_max: (limits.q_max / n.max(1) as u32).max(1),
+            c_max: (limits.c_max / n.max(1) as u32).max(1),
+            b_max: (limits.b_max / n.max(1) as u32).max(1),
+            ..limits
+        };
+        (0..n.max(1))
+            .map(|_| Arc::new(Mutex::new(Sched::new(rule, custom, per_shard))))
+            .collect()
+    }
+
     /// FNV-1a over the address bytes — the IP hash key.
     pub fn ip_key(peer: std::net::SocketAddr) -> u32 {
         let mut h = 0x811c_9dc5u32;
@@ -271,53 +295,69 @@ impl Sched {
         bnn.predict(&f)
     }
 
-    /// Request admission: bounds first, then the rule-mode score.
-    /// Returns the outcome and the integer score (for the priority
-    /// queue the scheduler would maintain).
-    pub fn admit_request(&mut self, key: u32) -> (Admission, i32) {
-        self.tick = self.tick.wrapping_add(1);
-        let limits = self.limits;
-        let w = Weights::for_mode(self.rule, self.custom);
-        let q_total = self.q_total;
-        let backlog = self.backlog;
-        // Phase 1: update counters + evaluate (entry borrow ends here).
-        let (passes_fw, over, score) = {
-            let ip = self.entry(key);
-            ip.demand_update(1);
-            // Rolling window decay on `recent` (no clock in the hot
-            // path): `r -= r>>4` per request keeps the window counter
-            // bounded (~16x the sustained rate) so a long-lived client
-            // can never trip the 1024 threshold by volume alone.
-            ip.recent = ip.recent.wrapping_sub(ip.recent >> 4);
-            ip.recent = ip.recent.saturating_add(1);
-            ip.wait_ticks = ip.wait_ticks.saturating_add(1);
-            let fw = ip.exception
-                || (ip.demand as i32 <= (limits.d_limit << 3)
-                    && ip.recent <= 1024
-                    && ip.syns <= 256
-                    && ip.errs <= 64);
-            let over = ip.queued >= limits.q_per_ip || q_total >= limits.q_max;
-            let s = (w.div * (ip.queued == 0) as i32)
-                + (w.dem * ((limits.d_limit << 3) - ip.demand as i32))
-                + (w.exc * ip.exception as i32)
-                + (w.wait * ip.wait_ticks as i32)
-                - (w.qpen * ip.queued as i32);
-            (fw, over, s)
-        };
-        if !passes_fw {
-            return (Admission::Rejected, 0);
-        }
-        if over {
-            if backlog < limits.b_max {
+    /// Request admission, fragmented into fast/shortcut paths so each
+    /// request pays only for the checks it needs:
+    ///
+    /// 1. **Global bound** — one load + compare, no table access.
+    /// 2. **Per-IP update + bound** — one hash lookup, one compare.
+    /// 3. **Firewall** — SKIPPED entirely unless the per-IP `hot` flag
+    ///    is set (it only sets once a feature crosses a low-water mark,
+    ///    which normal traffic never does).
+    /// 4. **Commit** — two increments.
+    ///
+    /// The priority score is NOT computed here: nothing consumes it
+    /// (the scheduler queue is a separate component that would call
+    /// [`Sched::priority`]). Returns only the outcome.
+    pub fn admit_request(&mut self, key: u32) -> Admission {
+        // Shortcut 1: global queue bound, before touching the table.
+        if self.q_total >= self.limits.q_max {
+            if self.backlog < self.limits.b_max {
                 self.backlog += 1;
-                return (Admission::Backlogged, 0);
+                return Admission::Backlogged;
             }
-            return (Admission::Rejected, 0);
+            return Admission::Rejected;
         }
-        // Phase 2: commit (no outstanding borrow).
-        self.entry(key).queued += 1;
+        // Single entry borrow (field-level: `self.ips` only, so the
+        // other counters stay readable/writable).
+        let ip = self.ips.entry(key).or_default();
+        ip.demand_update(1);
+        // Rolling window decay on `recent` (no clock in the hot path):
+        // `r -= r>>4` per request keeps it bounded (~16x the sustained
+        // rate) so a long-lived client can never trip the threshold by
+        // volume alone.
+        ip.recent = ip.recent.wrapping_sub(ip.recent >> 4);
+        ip.recent = ip.recent.saturating_add(1);
+        ip.wait_ticks = ip.wait_ticks.saturating_add(1);
+        // Arm the firewall only when a feature could plausibly fail it.
+        if ip.demand as i32 >= (self.limits.d_limit << 3)
+            || ip.recent >= 1024
+            || ip.syns >= 256
+            || ip.errs >= 64
+        {
+            ip.hot = true;
+        }
+        // Shortcut 2: per-IP queue bound.
+        if ip.queued >= self.limits.q_per_ip {
+            if self.backlog < self.limits.b_max {
+                self.backlog += 1;
+                return Admission::Backlogged;
+            }
+            return Admission::Rejected;
+        }
+        // Shortcut 3: firewall predicate — only when armed.
+        if ip.hot
+            && !ip.exception
+            && (ip.demand as i32 > (self.limits.d_limit << 3)
+                || ip.recent > 1024
+                || ip.syns > 256
+                || ip.errs > 64)
+        {
+            return Admission::Rejected;
+        }
+        // Commit.
+        ip.queued += 1;
         self.q_total += 1;
-        (Admission::Accepted, score)
+        Admission::Accepted
     }
 
     /// Admission score `A_i` (diversity + demand + exception + wait - q).
@@ -504,19 +544,19 @@ mod tests {
         let k = |o: u8| Sched::ip_key(ip(1, 1, 1, o));
         let k1 = k(1);
         let k2 = k(2);
-        assert_eq!(s.admit_request(k1).0, Admission::Accepted);
-        assert_eq!(s.admit_request(k1).0, Admission::Accepted);
+        assert_eq!(s.admit_request(k1), Admission::Accepted);
+        assert_eq!(s.admit_request(k1), Admission::Accepted);
         // Per-IP cap hit -> backlog (b_max default large).
-        assert_eq!(s.admit_request(k1).0, Admission::Backlogged);
+        assert_eq!(s.admit_request(k1), Admission::Backlogged);
         s.release_request(k1);
         s.release_request(k1);
         assert_eq!(s.q_total, 0);
         // Global cap: 4 in flight from 4 distinct IPs, then reject.
-        assert_eq!(s.admit_request(k1).0, Admission::Accepted);
-        assert_eq!(s.admit_request(k2).0, Admission::Accepted);
-        assert_eq!(s.admit_request(k(3)).0, Admission::Accepted);
-        assert_eq!(s.admit_request(k(4)).0, Admission::Accepted);
-        assert_eq!(s.admit_request(k(5)).0, Admission::Backlogged);
+        assert_eq!(s.admit_request(k1), Admission::Accepted);
+        assert_eq!(s.admit_request(k2), Admission::Accepted);
+        assert_eq!(s.admit_request(k(3)), Admission::Accepted);
+        assert_eq!(s.admit_request(k(4)), Admission::Accepted);
+        assert_eq!(s.admit_request(k(5)), Admission::Backlogged);
     }
 
     #[test]
@@ -528,7 +568,7 @@ mod tests {
         // even after admit_request's demand_update(1) decays it.
         s.entry(k).demand = ((s.limits.d_limit << 3) + 200) as u32;
         assert!(!s.firewall_pass(&s.state(k)));
-        assert_eq!(s.admit_request(k).0, Admission::Rejected);
+        assert_eq!(s.admit_request(k), Admission::Rejected);
         // Exception flag bypasses.
         s.entry(k).exception = true;
         assert!(s.firewall_pass(&s.state(k)));

@@ -228,11 +228,11 @@ mod tests {
             post: None,
             metrics: metrics.clone(),
             cfg: Arc::new(cfg),
-            sched: Arc::new(parking_lot::Mutex::new(crate::sched::Sched::new(
+            sched: vec![Arc::new(parking_lot::Mutex::new(crate::sched::Sched::new(
                 crate::sched::RuleMode::default(),
                 crate::sched::Weights::default(),
                 crate::sched::Limits::default(),
-            ))),
+            )))],
         };
         let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
         let mk = || In {
