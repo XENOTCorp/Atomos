@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ use crate::atom::AtomCtx;
 use crate::encode::encode_response;
 use crate::error::ServeError;
 use crate::flags::FlagSet;
-use crate::io::{Body, HeaderView, In};
+use crate::io::{Body, HeaderView, In, OutBody};
 use crate::parse::{looks_like_json, parse_request, scan_json, ParseStatus};
 use crate::pin_cpu;
 use crate::route::Router;
@@ -60,10 +61,23 @@ struct Conn<'a> {
     pos: usize,
     out: Vec<u8>,
     out_off: usize,
+    /// File body being sent with `sendfile` after the header bytes in
+    /// `out` are flushed. Non-None means the response is not fully
+    /// written: the worker keeps writable interest and skips reads
+    /// until it completes (request/response order must be preserved).
+    pending_sf: Option<PendingSf>,
     /// Held for the connection's lifetime: dropping it releases the
     /// table slot exactly once (never call `release_slot` while a guard
     /// is alive — that would double-release the free-list ring).
     slot: ConnectionSlot<'a, CONN_CAP>,
+}
+
+/// Remaining range of an open file to send kernel-side.
+struct PendingSf {
+    file: Arc<std::fs::File>,
+    /// `off_t` so it can be passed to `sendfile` without a cast.
+    offset: libc::off_t,
+    len: u64,
 }
 
 /// Blocking. One pinned OS thread per worker; no tokio on the datapath.
@@ -172,22 +186,26 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
             }
             let mut drop_fd = ev.error || ev.hang_up;
             if let Some(c) = streams.get_mut(&token) {
-                if !drop_fd && ev.readable && c.out.is_empty() {
+                // A pending sendfile (or buffered out bytes) means the
+                // response is mid-write: do not read/parse the next
+                // pipelined request until it is fully sent.
+                if !drop_fd && ev.readable && c.out.is_empty() && c.pending_sf.is_none() {
                     match read_and_serve(c, &router) {
                         Ok(false) => drop_fd = true,
                         Ok(true) => {}
                         Err(_) => drop_fd = true,
                     }
                 }
-                if !c.out.is_empty() && (ev.writable || ev.readable) {
+                let busy = !c.out.is_empty() || c.pending_sf.is_some();
+                if busy && (ev.writable || ev.readable) {
                     if flush_out(c).is_err() {
                         drop_fd = true;
-                    } else if c.out.is_empty() {
+                    } else if c.out.is_empty() && c.pending_sf.is_none() {
                         let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::Readable);
                     } else {
                         let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::ReadableWritable);
                     }
-                } else if !c.out.is_empty() {
+                } else if busy {
                     let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::ReadableWritable);
                 }
             }
@@ -235,6 +253,7 @@ fn accept_loop<'a>(
                         pos: 0,
                         out: Vec::new(),
                         out_off: 0,
+                        pending_sf: None,
                         slot,
                     },
                 );
@@ -344,6 +363,15 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
                     encode_response(&out, &mut enc);
                     c.out.extend_from_slice(&enc);
                 });
+                if let OutBody::File(f) = &out.body {
+                    // Headers are in `out` (Content-Length = file size);
+                    // the body goes kernel-side via sendfile.
+                    c.pending_sf = Some(PendingSf {
+                        file: f.file.clone(),
+                        offset: f.offset as libc::off_t,
+                        len: f.len,
+                    });
+                }
                 if let Some((method, path)) = log {
                     access_log::emit(method, &path, out.status.as_u16(), out.body.len());
                 }
@@ -367,6 +395,49 @@ fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
     }
     c.out.clear();
     c.out_off = 0;
+    // Drain the file body kernel-side. Take/put so the borrow checker
+    // does not hold `pending_sf` while `stream` is borrowed.
+    loop {
+        let mut sf = match c.pending_sf.take() {
+            Some(s) => s,
+            None => break,
+        };
+        // SAFETY: both fds are valid and owned by this connection; the
+        // offset/count stay within the file range the fd was opened
+        // for (StaticMod sets offset=0, len=file size).
+        let n = unsafe {
+            libc::sendfile(
+                c.stream.as_raw_fd(),
+                sf.file.as_raw_fd(),
+                &mut sf.offset as *mut libc::off_t,
+                sf.len as usize,
+            )
+        };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::WouldBlock {
+                c.pending_sf = Some(sf);
+                return Ok(());
+            }
+            return Err(e);
+        }
+        let n = n as u64;
+        if n == 0 {
+            // EOF before the range was sent: the file shrank underneath
+            // us (cache is stale). Bail out rather than hang.
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "sendfile: file shorter than cached range",
+            ));
+        }
+        if n >= sf.len {
+            // Range fully sent.
+            continue;
+        }
+        sf.offset += n as libc::off_t;
+        sf.len -= n;
+        c.pending_sf = Some(sf);
+    }
     Ok(())
 }
 

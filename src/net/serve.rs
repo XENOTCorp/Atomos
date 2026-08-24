@@ -395,7 +395,15 @@ where
     if buf.capacity() < 512 {
         buf = Vec::with_capacity(2048);
     }
-    encode_response(out, &mut buf);
+    if matches!(out.body, crate::io::OutBody::File(_)) {
+        // Tokio H1 cannot sendfile (generic AsyncWrite, possibly TLS):
+        // materialize the file on a blocking thread, then encode bytes.
+        let mut o = out.clone();
+        o.body = crate::io::OutBody::Raw(crate::proto::materialize_file_body(&o).await);
+        encode_response(&o, &mut buf);
+    } else {
+        encode_response(out, &mut buf);
+    }
     let r = stream.write_all(&buf).await;
     ENC.with(|cell| {
         let _ = cell.replace(buf);

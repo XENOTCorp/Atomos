@@ -7,7 +7,7 @@ use http::header::{HeaderName, HeaderValue};
 
 use crate::error::ServeError;
 use crate::flags::FlagSet;
-use crate::io::{Body, HeaderView, In, Out};
+use crate::io::{Body, HeaderView, In, Out, OutBody};
 use crate::parse::{looks_like_json, scan_json};
 use crate::route::Router;
 use crate::status::Status;
@@ -119,6 +119,23 @@ pub async fn stream_dispatch(
             return page(router, 400, "parse");
         };
         dispatch_parts(router, &parts, peer).await
+    }
+}
+
+/// Materialize a `File` body for the tokio paths, which cannot sendfile
+/// (H2/H3 framing and TLS need the bytes in memory). The blocking read
+/// runs on a blocking thread so a current-thread worker is not stalled.
+/// Returns an empty body if the file cannot be read (the fd was valid
+/// at dispatch; only an I/O error mid-read can get here).
+pub async fn materialize_file_body(out: &Out) -> Bytes {
+    match &out.body {
+        OutBody::File(f) => {
+            let f = f.clone();
+            tokio::task::spawn_blocking(move || f.read_to_bytes().unwrap_or_default())
+                .await
+                .unwrap_or_default()
+        }
+        _ => Bytes::new(),
     }
 }
 

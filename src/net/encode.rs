@@ -16,9 +16,12 @@ pub fn encode_response(out: &Out, dst: &mut Vec<u8>) {
         .unwrap_or_else(|| out.status.phrase());
     dst.extend_from_slice(phrase.as_bytes());
     dst.extend_from_slice(b"\r\n");
-    let body = out.body.as_bytes();
+    // `len()` not `as_bytes().len()`: a File body reports its size for
+    // Content-Length but contributes no bytes here (sendfile sends the
+    // body kernel-side).
+    let body_len = out.body.len();
     dst.extend_from_slice(b"Content-Length: ");
-    let n = usize_to_slice(body.len(), &mut nb);
+    let n = usize_to_slice(body_len, &mut nb);
     dst.extend_from_slice(&nb[..n]);
     dst.extend_from_slice(b"\r\nConnection: keep-alive\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n");
     for (k, v) in &out.headers {
@@ -28,7 +31,9 @@ pub fn encode_response(out: &Out, dst: &mut Vec<u8>) {
         dst.extend_from_slice(b"\r\n");
     }
     dst.extend_from_slice(b"\r\n");
-    dst.extend_from_slice(body);
+    // File bodies send their bytes via sendfile, not here (as_bytes is
+    // empty for them).
+    dst.extend_from_slice(out.body.as_bytes());
 }
 
 #[cfg(test)]

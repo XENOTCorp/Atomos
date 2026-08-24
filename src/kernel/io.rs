@@ -117,6 +117,43 @@ pub enum OutBody {
     /// epoll path encodes it as empty — streaming modules are async and
     /// never dispatch on the sync H1 loop).
     Stream(StreamBody),
+    /// Open file range. The H1 epoll path sends it with `sendfile`
+    /// (zero-copy in kernel); the tokio paths materialize it via
+    /// [`FileBody::read_to_bytes`] (H2/H3 framing and TLS need the
+    /// bytes in memory). Never stored in the response cache.
+    File(FileBody),
+}
+
+/// Open file range to be sent with `sendfile` on the H1 epoll path.
+/// The fd stays open for the lifetime of the `Arc` — `StaticMod` keeps
+/// a bounded LRU of these (the open_file_cache equivalent; stale after
+/// on-disk replace until evicted, same as nginx).
+#[derive(Clone, Debug)]
+pub struct FileBody {
+    pub file: std::sync::Arc<std::fs::File>,
+    pub offset: u64,
+    pub len: u64,
+}
+
+impl FileBody {
+    /// Blocking `pread` of the whole range into memory. Used by the
+    /// tokio paths (H1/H2/H3), which cannot sendfile: framing and TLS
+    /// need the bytes in memory. Callers on a tokio worker should run
+    /// this on a blocking thread (`tokio::task::spawn_blocking`).
+    pub fn read_to_bytes(&self) -> std::io::Result<Bytes> {
+        use std::os::unix::fs::FileExt;
+        let mut buf = vec![0u8; self.len as usize];
+        let mut got = 0usize;
+        while got < buf.len() {
+            let n = self.file.read_at(&mut buf[got..], self.offset + got as u64)?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        buf.truncate(got);
+        Ok(Bytes::from(buf))
+    }
 }
 
 /// Chunk receiver for a streaming response body. Wrapped so `Out` stays
@@ -138,13 +175,14 @@ impl OutBody {
         match self {
             OutBody::Empty => b"",
             OutBody::Raw(b) | OutBody::Json(b) => b,
-            OutBody::Stream(_) => b"",
+            OutBody::Stream(_) | OutBody::File(_) => b"",
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
             OutBody::Stream(_) => 0,
+            OutBody::File(f) => f.len as usize,
             _ => self.as_bytes().len(),
         }
     }

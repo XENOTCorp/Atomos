@@ -174,11 +174,13 @@ where
             }
         }
         _ => {
-            if !matches!(out.body, OutBody::Empty) {
-                send_half
-                    .send_data(Bytes::copy_from_slice(out.body.as_bytes()))
-                    .await
-                    .map_err(h3_err)?;
+            let body = if matches!(out.body, OutBody::File(_)) {
+                crate::proto::materialize_file_body(&out).await
+            } else {
+                Bytes::copy_from_slice(out.body.as_bytes())
+            };
+            if !body.is_empty() {
+                send_half.send_data(body).await.map_err(h3_err)?;
             }
         }
     }

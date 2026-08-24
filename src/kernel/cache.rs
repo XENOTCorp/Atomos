@@ -174,7 +174,10 @@ impl ResponseCache {
     pub fn put(&self, method: Method, path: &str, query: &str, out: &Out) {
         // Streaming bodies are never cacheable: the chunk receiver is
         // single-use and the wire bytes are generated incrementally.
-        if matches!(out.body, crate::io::OutBody::Stream(_)) {
+        // File bodies are never cached either: the open fd is a bounded
+        // kernel resource held by StaticMod's LRU, not by per-worker
+        // entries (each worker would pin its own copy of every fd).
+        if matches!(out.body, crate::io::OutBody::Stream(_) | crate::io::OutBody::File(_)) {
             return;
         }
         let (ttl_ms, name) = match &out.cache {

@@ -238,8 +238,12 @@ async fn serve_one(
                 .v
                 .fetch_add(body_len as u64, Ordering::Relaxed);
             if !eos {
-                send.send_data(Bytes::copy_from_slice(out.body.as_bytes()), true)
-                    .map_err(h2_err)?;
+                let body = if matches!(out.body, OutBody::File(_)) {
+                    crate::proto::materialize_file_body(&out).await
+                } else {
+                    Bytes::copy_from_slice(out.body.as_bytes())
+                };
+                send.send_data(body, true).map_err(h2_err)?;
             }
         }
     }
