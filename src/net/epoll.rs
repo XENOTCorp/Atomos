@@ -6,7 +6,14 @@
 //! ConnTable with hot/cold cache-line halves and packed ConnectionId
 //! tokens (a closed fd's number can never alias a live connection).
 //! No tokio tasks, no spawn-per-conn. H2/H3 are not handled here.
+//!
+//! The receive loop allocates nothing after warm-up: the request buffer
+//! is consumed through a read cursor (compacted once per 64 KiB instead
+//! of a `drain` memmove per request) and the response encoder writes
+//! into a reused thread-local scratch instead of a fresh `Vec` per
+//! request.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -34,10 +41,23 @@ use crate::route::Router;
 /// listener token).
 const TOKEN_LISTENER: u64 = u64::MAX;
 
+/// Consumed bytes are compacted out of `Conn::buf` once this much has
+/// been read (one memmove per 64 KiB instead of per request).
+const COMPACT_THRESHOLD: usize = 64 * 1024;
+
+// Reused response-encoding scratch (per worker thread; zero allocation
+// per request after warm-up).
+thread_local! {
+    static ENC: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(2048));
+}
+
 struct Conn<'a> {
     stream: TcpStream,
     peer: SocketAddr,
     buf: Vec<u8>,
+    /// Bytes of `buf` already consumed by completed requests (read
+    /// cursor; compacted out past [`COMPACT_THRESHOLD`]).
+    pos: usize,
     out: Vec<u8>,
     out_off: usize,
     /// Held for the connection's lifetime: dropping it releases the
@@ -212,6 +232,7 @@ fn accept_loop<'a>(
                         stream,
                         peer,
                         buf: Vec::with_capacity(4096),
+                        pos: 0,
                         out: Vec::new(),
                         out_off: 0,
                         slot,
@@ -241,23 +262,29 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) => return Err(e),
         }
-        if c.buf.len() > router.cfg.max_header_bytes + router.cfg.max_body_bytes {
+        if c.buf.len() - c.pos > router.cfg.max_header_bytes + router.cfg.max_body_bytes {
             return Ok(false);
         }
     }
     loop {
-        match parse_request(&c.buf, router.cfg.max_header_bytes) {
+        // Compact consumed bytes once per 64 KiB (amortized memmove).
+        if c.pos >= COMPACT_THRESHOLD {
+            c.buf.drain(..c.pos);
+            c.pos = 0;
+        }
+        match parse_request(&c.buf[c.pos..], router.cfg.max_header_bytes) {
             Ok(ParseStatus::Partial) => return Ok(true),
             Err(_) => return Ok(false),
             Ok(ParseStatus::Complete(p)) => {
                 if p.content_length > router.cfg.max_body_bytes {
                     return Ok(false);
                 }
-                let need = p.header_end + p.content_length;
-                if c.buf.len() < need {
+                let need_rel = p.header_end + p.content_length;
+                if c.buf.len() - c.pos < need_rel {
                     return Ok(true);
                 }
-                if c.buf.first() == Some(&b'P') && c.buf.starts_with(b"PRI ") {
+                let need = c.pos + need_rel;
+                if c.buf.get(c.pos) == Some(&b'P') && c.buf[c.pos..].starts_with(b"PRI ") {
                     return Ok(false);
                 }
                 if p.content_length == 0 {
@@ -272,7 +299,7 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
                                 };
                             access_log::emit(p.method, p.path, status, blen);
                         }
-                        c.buf.drain(..need);
+                        c.pos = need;
                         c.out.extend_from_slice(wire.as_ref());
                         c.out_off = 0;
                         if !ka {
@@ -282,12 +309,12 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
                         continue;
                     }
                 }
-                let body_bytes = &c.buf[p.header_end..need];
+                let body_bytes = &c.buf[c.pos + p.header_end..need];
                 if looks_like_json(body_bytes)
                     && scan_json(body_bytes, router.cfg.max_json_depth).is_err()
                 {
                     let ka = p.keepalive;
-                    c.buf.drain(..need);
+                    c.pos = need;
                     return Ok(ka);
                 }
                 let body = if p.content_length == 0 {
@@ -309,13 +336,18 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
                 let ka = p.keepalive;
                 let log = router.cfg.access_log.then(|| (p.method, p.path.to_string()));
                 let out = router.dispatch(req);
-                let mut tmp = Vec::new();
-                encode_response(&out, &mut tmp);
+                // Encode into the reused thread-local scratch: no heap
+                // allocation per request after warm-up.
+                ENC.with(|enc| {
+                    let mut enc = enc.borrow_mut();
+                    enc.clear();
+                    encode_response(&out, &mut enc);
+                    c.out.extend_from_slice(&enc);
+                });
                 if let Some((method, path)) = log {
                     access_log::emit(method, &path, out.status.as_u16(), out.body.len());
                 }
-                c.out.extend_from_slice(&tmp);
-                c.buf.drain(..need);
+                c.pos = need;
                 if !ka {
                     let _ = flush_out(c);
                     return Ok(false);
