@@ -28,6 +28,9 @@ pub struct Router {
     pub gov: Governor,
     pub errors: ErrorPage,
     pub metrics: Arc<Metrics>,
+    /// Integer admission scheduler (firewall + bounds + rule-mode
+    /// priority). See `crate::sched`.
+    pub sched: Arc<parking_lot::Mutex<crate::sched::Sched>>,
 }
 
 impl Router {
@@ -36,6 +39,50 @@ impl Router {
             .load()
             .values()
             .any(|h| matches!(h, crate::module::Handler::Async(_)))
+    }
+
+    /// Integer scheduler gate: firewall precondition + admission bounds
+    /// + rule-mode score (see `crate::sched`).
+    ///
+    /// Returns a guard that releases the queue slot on drop, or `None`
+    /// when the request is rejected/backlogged. O(1), integer-only.
+    pub fn admit(&self, peer: std::net::SocketAddr) -> Option<crate::sched::ReqGuard> {
+        let key = crate::sched::Sched::ip_key(peer);
+        let ok = {
+            let mut s = self.sched.lock();
+            let (outcome, _score) = s.admit_request(key);
+            outcome == crate::sched::Admission::Accepted
+        };
+        ok.then(|| crate::sched::ReqGuard {
+            sched: self.sched.clone(),
+            key,
+        })
+    }
+
+    /// Connection admission for the transport layer (H2/H3 accept).
+    pub fn admit_conn(&self, peer: std::net::SocketAddr) -> Option<crate::sched::ConnGuard> {
+        let key = crate::sched::Sched::ip_key(peer);
+        let ok = self.sched.lock().admit_conn(key);
+        ok.then(|| crate::sched::ConnGuard {
+            sched: self.sched.clone(),
+            key,
+        })
+    }
+
+    /// Streaming-module lookup for the tokio paths: the rule for
+    /// `(method, path)` maps to a `Handler::Stream`.
+    pub fn stream_handler(
+        &self,
+        method: &http::Method,
+        path: &str,
+    ) -> Option<Arc<dyn crate::module::AsyncStreamModule>> {
+        let rules = self.rules.load();
+        let m = crate::io::Method::parse(method.as_str())?;
+        let rule = rules.match_method(m, path)?;
+        match self.modules.load().get(rule.module.as_ref())? {
+            crate::module::Handler::Stream(h) => Some(h.clone()),
+            _ => None,
+        }
     }
 
     pub fn module(&self, name: &str) -> Option<Handler> {
@@ -71,6 +118,11 @@ impl Router {
 impl Router {
     pub fn dispatch(&self, mut req: In<'_>) -> Out {
         self.metrics.requests.v.fetch_add(1, Ordering::Relaxed);
+        // Integer scheduler gate (firewall + admission). The guard
+        // releases the slot on every exit path.
+        let Some(_guard) = self.admit(req.peer) else {
+            return self.track_bytes(self.err_out(ServeError::Capacity, "scheduler"));
+        };
         if self.gov.hard_block() {
             return self.track_bytes(self.err_out(ServeError::Capacity, "resource bound"));
         }
@@ -119,6 +171,12 @@ impl Router {
                 return self.track_bytes(self.err_out(
                     ServeError::Module("async module requires dispatch_async".into()),
                     "async",
+                ));
+            }
+            Handler::Stream(_) => {
+                return self.track_bytes(self.err_out(
+                    ServeError::Module("streaming module requires the tokio paths".into()),
+                    "stream",
                 ));
             }
         };
@@ -191,6 +249,12 @@ impl Router {
                     Ok(o) => o,
                     Err(e) => return self.track_bytes(self.err_out(e, "module")),
                 }
+            }
+            Handler::Stream(_) => {
+                return self.track_bytes(self.err_out(
+                    ServeError::Module("streaming module requires dispatch on the tokio paths".into()),
+                    "stream",
+                ));
             }
         };
         if let Some(post) = &self.post {

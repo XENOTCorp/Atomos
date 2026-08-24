@@ -113,6 +113,24 @@ pub enum OutBody {
     Empty,
     Raw(Bytes),
     Json(Bytes),
+    /// Response body streamed as chunks arrive (tokio path; the H1
+    /// epoll path encodes it as empty — streaming modules are async and
+    /// never dispatch on the sync H1 loop).
+    Stream(StreamBody),
+}
+
+/// Chunk receiver for a streaming response body. Wrapped so `Out` stays
+/// `Clone` (the cache clones `Out`); take it exactly once.
+#[derive(Clone, Debug)]
+pub struct StreamBody(pub std::sync::Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Receiver<Bytes>>>>);
+
+impl StreamBody {
+    pub fn take(&self) -> tokio::sync::mpsc::Receiver<Bytes> {
+        self.0
+            .lock()
+            .take()
+            .expect("StreamBody taken more than once")
+    }
 }
 
 impl OutBody {
@@ -120,11 +138,15 @@ impl OutBody {
         match self {
             OutBody::Empty => b"",
             OutBody::Raw(b) | OutBody::Json(b) => b,
+            OutBody::Stream(_) => b"",
         }
     }
 
     pub fn len(&self) -> usize {
-        self.as_bytes().len()
+        match self {
+            OutBody::Stream(_) => 0,
+            _ => self.as_bytes().len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

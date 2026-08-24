@@ -4,12 +4,12 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 
 use crate::atom::AtomCtx;
 use crate::error::ServeError;
-use crate::io::OutBody;
-use crate::proto::{self, Parts};
+use crate::io::{Out, OutBody};
+use crate::proto;
 use crate::route::Router;
 use crate::tls::TlsSet;
 
@@ -46,6 +46,11 @@ async fn handle_conn(
     peer: SocketAddr,
     router: Arc<Router>,
 ) -> Result<(), ServeError> {
+    // Connection admission (integer scheduler): per-IP + global caps.
+    let Some(_conn_guard) = router.admit_conn(peer) else {
+        conn.close(0u32.into(), b"scheduler");
+        return Ok(());
+    };
     router.metrics.h3_conns.v.fetch_add(1, Ordering::Relaxed);
     let mut h3 = h3::server::builder()
         .build(h3_quinn::Connection::new(conn))
@@ -56,7 +61,7 @@ async fn handle_conn(
             Ok(Some(resolver)) => {
                 let router = router.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_one(resolver, peer, &router).await {
+                    if let Err(e) = serve_one(resolver, peer, router).await {
                         tracing::debug!(%e, "h3 stream");
                     }
                 });
@@ -83,13 +88,13 @@ fn raw_header_bytes(head: &http::request::Parts) -> u64 {
 async fn serve_one<C>(
     resolver: h3::server::RequestResolver<C, Bytes>,
     peer: SocketAddr,
-    router: &Router,
+    router: Arc<Router>,
 ) -> Result<(), ServeError>
 where
     C: h3::quic::Connection<Bytes>,
-    <C as h3::quic::OpenStreams<Bytes>>::BidiStream: Send + 'static,
+    <C as h3::quic::OpenStreams<Bytes>>::BidiStream: h3::quic::BidiStream<Bytes> + Send + 'static,
 {
-    let (req, mut stream) = resolver.resolve_request().await.map_err(h3_err)?;
+    let (req, stream) = resolver.resolve_request().await.map_err(h3_err)?;
     let (head, _) = req.into_parts();
     router.metrics.h3_streams.v.fetch_add(1, Ordering::Relaxed);
     router
@@ -97,32 +102,87 @@ where
         .h3_headers_raw
         .v
         .fetch_add(raw_header_bytes(&head), Ordering::Relaxed);
-    let mut body = BytesMut::new();
-    while let Some(mut chunk) = stream.recv_data().await.map_err(h3_err)? {
-        let n = chunk.remaining();
-        if body.len().saturating_add(n) > router.cfg.max_body_bytes {
-            return Err(ServeError::BodyTooLarge);
+    // Split into send/recv halves: the feed runs inline (the recv half
+    // is not `Send`); this task streams the response out.
+    let (mut send_half, mut recv_half) = stream.split();
+    // Streaming dispatch: body chunks flow to the module as they
+    // arrive; the module may answer with `OutBody::Stream`. The recv
+    // half is not `Send`, so the feed runs inline in the select.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    let mut tx = Some(tx);
+    let router2 = router.clone();
+    let head2 = head.clone();
+    let max_body = router.cfg.max_body_bytes;
+    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, &head2, peer, rx).await });
+    // Run the dispatch task and the body feed concurrently (the recv
+    // half is not `Send`, so the feed lives inline here): body chunks
+    // reach the module as they arrive, and the task completes when the
+    // channel closes (buffered fallback) or promptly (streaming module).
+    let mut task = task;
+    let mut out: Option<Out> = None;
+    let mut body_len: usize = 0;
+    loop {
+        tokio::select! {
+            r = &mut task, if out.is_none() => {
+                out = Some(match r {
+                    Ok(o) => o,
+                    Err(_) => return Err(ServeError::Io(std::io::Error::other("stream task"))),
+                });
+            }
+            chunk = recv_half.recv_data(), if tx.is_some() => {
+                match chunk {
+                    Ok(Some(mut c)) => {
+                        let n = c.remaining();
+                        body_len += n;
+                        if body_len > max_body {
+                            return Err(ServeError::BodyTooLarge);
+                        }
+                        let b = Bytes::copy_from_slice(c.chunk());
+                        c.advance(n);
+                        if let Some(t) = &tx {
+                            if t.send(b).await.is_err() {
+                                tx = None; // module closed early
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tx = None; // drop the sender: closes the channel
+                    }
+                    Err(e) => return Err(h3_err(e)),
+                }
+            }
         }
-        body.extend_from_slice(chunk.chunk());
-        chunk.advance(n);
+        if out.is_some() && tx.is_none() {
+            break;
+        }
     }
+    let out = out.expect("dispatch task completed");
     router
         .metrics
         .h3_body_in
         .v
-        .fetch_add(body.len() as u64, Ordering::Relaxed);
-    let req = http::Request::from_parts(head, body.freeze());
-    let parts: Parts = proto::parts_from_http(req)?;
-    let out = proto::dispatch_parts(router, &parts, peer).await;
+        .fetch_add(body_len as u64, Ordering::Relaxed);
     let http_res = proto::out_to_http(&out);
-    stream.send_response(http_res).await.map_err(h3_err)?;
-    if !matches!(out.body, OutBody::Empty) {
-        stream
-            .send_data(Bytes::copy_from_slice(out.body.as_bytes()))
-            .await
-            .map_err(h3_err)?;
+    send_half.send_response(http_res).await.map_err(h3_err)?;
+    match out.body {
+        OutBody::Stream(s) => {
+            // The module produced chunks while the body was feeding;
+            // flush them all, then finish.
+            let mut out_rx = s.take();
+            while let Some(c) = out_rx.recv().await {
+                send_half.send_data(c).await.map_err(h3_err)?;
+            }
+        }
+        _ => {
+            if !matches!(out.body, OutBody::Empty) {
+                send_half
+                    .send_data(Bytes::copy_from_slice(out.body.as_bytes()))
+                    .await
+                    .map_err(h3_err)?;
+            }
+        }
     }
-    stream.finish().await.map_err(h3_err)?;
+    send_half.finish().await.map_err(h3_err)?;
     Ok(())
 }
 

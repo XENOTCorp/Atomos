@@ -12,12 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::error::ServeError;
 use crate::io::OutBody;
-use crate::proto::{self, Parts};
+use crate::proto;
 use crate::route::Router;
 
 /// Counts every byte crossing the connection (handshake, HPACK header
@@ -91,6 +91,10 @@ pub async fn handle<S>(io: S, peer: SocketAddr, router: Arc<Router>) -> Result<(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // Connection admission (integer scheduler): per-IP + global caps.
+    let Some(_conn_guard) = router.admit_conn(peer) else {
+        return Ok(());
+    };
     let rx = Arc::new(AtomicU64::new(0));
     let tx = Arc::new(AtomicU64::new(0));
     let counted = CountingIo::new(io, rx.clone(), tx.clone());
@@ -104,7 +108,7 @@ where
         let (req, mut respond) = req.map_err(h2_err)?;
         let router = router.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_one(req, &mut respond, peer, &router).await {
+            if let Err(e) = serve_one(req, &mut respond, peer, router.clone()).await {
                 if e.is_reset() {
                     router.metrics.h2_rst.v.fetch_add(1, Ordering::Relaxed);
                 }
@@ -129,39 +133,115 @@ async fn serve_one(
     req: http::Request<h2::RecvStream>,
     respond: &mut h2::server::SendResponse<Bytes>,
     peer: SocketAddr,
-    router: &Router,
+    router: Arc<Router>,
 ) -> Result<(), ServeError> {
-    let (head, mut recv) = req.into_parts();
+    let (head, recv) = req.into_parts();
     router.metrics.h2_streams.v.fetch_add(1, Ordering::Relaxed);
     router
         .metrics
         .h2_headers_raw
         .v
         .fetch_add(raw_header_bytes(&head), Ordering::Relaxed);
-    let mut body = BytesMut::new();
-    while let Some(chunk) = recv.data().await {
-        let chunk = chunk.map_err(h2_err)?;
-        if body.len().saturating_add(chunk.len()) > router.cfg.max_body_bytes {
-            respond.send_reset(h2::Reason::REFUSED_STREAM);
-            return Err(ServeError::BodyTooLarge);
+    // Streaming dispatch: the module sees body chunks as they arrive
+    // (mpsc) and may answer with an `OutBody::Stream`. The feed task
+    // forwards the request body while the dispatch task runs, so a
+    // streaming module processes data as it comes in.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    let router2 = router.clone();
+    let head2 = head.clone();
+    let max_body = router.cfg.max_body_bytes;
+    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, &head2, peer, rx).await });
+    let mut feed = tokio::spawn(async move {
+        let mut body_len: usize = 0;
+        let mut recv = recv;
+        while let Some(chunk) = recv.data().await {
+            let chunk = chunk.map_err(h2_err)?;
+            body_len += chunk.len();
+            if body_len > max_body {
+                return Err(ServeError::BodyTooLarge);
+            }
+            let _ = recv.flow_control().release_capacity(chunk.len());
+            if tx.send(chunk).await.is_err() {
+                break; // module closed its side (or gave up)
+            }
         }
-        let _ = recv.flow_control().release_capacity(chunk.len());
-        body.extend_from_slice(&chunk);
-    }
-    router
-        .metrics
-        .h2_body_in
-        .v
-        .fetch_add(body.len() as u64, Ordering::Relaxed);
-    let req = http::Request::from_parts(head, body.freeze());
-    let parts: Parts = proto::parts_from_http(req)?;
-    let out = proto::dispatch_parts(router, &parts, peer).await;
+        Ok(body_len)
+    });
+    let out = match task.await {
+        Ok(out) => out,
+        Err(_) => return Err(ServeError::Io(std::io::Error::other("stream task"))),
+    };
     let http_res = proto::out_to_http(&out);
     let eos = matches!(out.body, OutBody::Empty);
     let mut send = respond.send_response(http_res, eos).map_err(h2_err)?;
-    if !eos {
-        send.send_data(Bytes::copy_from_slice(out.body.as_bytes()), true)
-            .map_err(h2_err)?;
+    match out.body {
+        OutBody::Stream(s) => {
+            let mut out_rx = s.take();
+            let mut feed_done = false;
+            let mut body_len: usize = 0;
+            loop {
+                tokio::select! {
+                    r = &mut feed, if !feed_done => {
+                        feed_done = true;
+                        body_len = match r {
+                            Ok(Ok(n)) => n,
+                            Ok(Err(e)) => {
+                                send.send_reset(h2::Reason::REFUSED_STREAM);
+                                return Err(e);
+                            }
+                            Err(_) => 0,
+                        };
+                    }
+                    chunk = out_rx.recv() => {
+                        match chunk {
+                            Some(c) => send.send_data(c, false).map_err(h2_err)?,
+                            None => {
+                                // Module finished; wait for the body feed
+                                // to complete so the stream is fully
+                                // consumed before we end the response.
+                                if !feed_done {
+                                    body_len = match (&mut feed).await {
+                                        Ok(Ok(n)) => n,
+                                        Ok(Err(e)) => {
+                                            send.send_reset(h2::Reason::REFUSED_STREAM);
+                                            return Err(e);
+                                        }
+                                        Err(_) => 0,
+                                    };
+                                }
+                                send.send_data(Bytes::new(), true).map_err(h2_err)?;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            router
+                .metrics
+                .h2_body_in
+                .v
+                .fetch_add(body_len as u64, Ordering::Relaxed);
+        }
+        _ => {
+            // Buffered response: drain the body feed, then send once.
+            let body_len = match feed.await {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    send.send_reset(h2::Reason::REFUSED_STREAM);
+                    return Err(e);
+                }
+                Err(_) => 0,
+            };
+            router
+                .metrics
+                .h2_body_in
+                .v
+                .fetch_add(body_len as u64, Ordering::Relaxed);
+            if !eos {
+                send.send_data(Bytes::copy_from_slice(out.body.as_bytes()), true)
+                    .map_err(h2_err)?;
+            }
+        }
     }
     Ok(())
 }

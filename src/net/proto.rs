@@ -44,6 +44,11 @@ pub fn parts_from_http(req: http::Request<Bytes>) -> Result<Parts, ServeError> {
 }
 
 pub async fn dispatch_parts(router: &Router, parts: &Parts, peer: SocketAddr) -> Out {
+    // Integer scheduler gate (firewall + admission); same policy as the
+    // H1 path (`Router::dispatch`). 429 when rejected/backlogged.
+    let Some(_guard) = router.admit(peer) else {
+        return page(router, 429, "scheduler");
+    };
     if parts.body.len() > router.cfg.max_body_bytes {
         return page(router, 413, "body");
     }
@@ -77,6 +82,43 @@ pub async fn dispatch_parts(router: &Router, parts: &Parts, peer: SocketAddr) ->
         router.dispatch_async(req).await
     } else {
         router.dispatch(req)
+    }
+}
+
+/// Streaming dispatch for the tokio paths (h2/h3). The request head is
+/// dispatched **while the body is still arriving** — chunks flow to the
+/// module through `body_rx` as the transport reads them. Modules that
+/// opt into `AsyncStreamModule` consume chunks incrementally; anything
+/// else falls back to the buffered `dispatch_parts` (which re-admits
+/// and re-validates exactly as before).
+pub async fn stream_dispatch(
+    router: &Router,
+    head: &http::request::Parts,
+    peer: SocketAddr,
+    body_rx: tokio::sync::mpsc::Receiver<Bytes>,
+) -> Out {
+    if let Some(h) = router.stream_handler(&head.method, head.uri.path()) {
+        // Integer scheduler gate, held for the whole streamed exchange.
+        let Some(_guard) = router.admit(peer) else {
+            return page(router, 429, "scheduler");
+        };
+        let req = http::Request::from_parts(head.clone(), ());
+        match h.handle_streaming(&req, body_rx).await {
+            Ok(out) => out,
+            Err(e) => page(router, e.status(), "stream"),
+        }
+    } else {
+        // Buffered fallback: collect the channel, then the normal path.
+        let mut body = bytes::BytesMut::new();
+        let mut rx = body_rx;
+        while let Some(c) = rx.recv().await {
+            body.extend_from_slice(&c);
+        }
+        let req = http::Request::from_parts(head.clone(), body.freeze());
+        let Ok(parts) = parts_from_http(req) else {
+            return page(router, 400, "parse");
+        };
+        dispatch_parts(router, &parts, peer).await
     }
 }
 

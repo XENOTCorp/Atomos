@@ -15,5 +15,6 @@ pub mod module;
 pub mod num;
 pub mod route;
 pub mod rules;
+pub mod sched;
 pub mod static_mod;
 pub mod status;

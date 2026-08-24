@@ -19,10 +19,24 @@ pub trait AsyncModule: Send + Sync + 'static {
     fn handle<'a>(&'a self, req: &'a InOwned) -> BoxFut<'a>;
 }
 
+/// A module that consumes the request body **as it arrives** (chunks
+/// through a channel) instead of after the whole body is buffered, and
+/// may return an `OutBody::Stream` response produced incrementally.
+/// H2/H3 (tokio) only; the sync H1 loop rejects streaming modules.
+pub trait AsyncStreamModule: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn handle_streaming<'a>(
+        &'a self,
+        req: &'a http::Request<()>,
+        body: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) -> BoxFut<'a>;
+}
+
 #[derive(Clone)]
 pub enum Handler {
     Sync(Arc<dyn Module>),
     Async(Arc<dyn AsyncModule>),
+    Stream(Arc<dyn AsyncStreamModule>),
 }
 
 pub type ModuleMap = hashbrown::HashMap<String, Handler>;

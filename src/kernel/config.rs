@@ -102,6 +102,78 @@ pub struct Config {
     pub tls_ticket_lifetime_secs: u64,
     /// Unix socket for `atomos-keyd`. If set, workers must not load tls_key.
     pub keyd_sock: Option<PathBuf>,
+    /// Integer scheduler: rule mode + limits (see `crate::sched`).
+    #[serde(default)]
+    pub scheduler: SchedConfig,
+}
+
+/// JSON block for the admission scheduler (integer-only).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase", default)]
+pub struct SchedConfig {
+    pub mode: crate::sched::RuleMode,
+    pub demand_limit: i32,
+    pub q_max: u32,
+    pub q_per_ip: u32,
+    pub c_max: u32,
+    pub c_per_ip: u32,
+    pub b_max: u32,
+    pub str_max: u32,
+    pub custom_div: i32,
+    pub custom_dem: i32,
+    pub custom_exc: i32,
+    pub custom_wait: i32,
+    pub custom_qpen: i32,
+    pub custom_cpen: i32,
+}
+
+impl Default for SchedConfig {
+    fn default() -> Self {
+        let l = crate::sched::Limits::default();
+        let w = crate::sched::Weights::default();
+        Self {
+            mode: crate::sched::RuleMode::default(),
+            demand_limit: l.d_limit,
+            q_max: l.q_max,
+            q_per_ip: l.q_per_ip,
+            c_max: l.c_max,
+            c_per_ip: l.c_per_ip,
+            b_max: l.b_max,
+            str_max: l.str_max,
+            custom_div: w.div,
+            custom_dem: w.dem,
+            custom_exc: w.exc,
+            custom_wait: w.wait,
+            custom_qpen: w.qpen,
+            custom_cpen: w.cpen,
+        }
+    }
+}
+
+impl SchedConfig {
+    /// Build the runtime `Limits` + `Weights` from this config block.
+    pub fn build(&self) -> (crate::sched::Limits, crate::sched::Weights) {
+        let limits = crate::sched::Limits {
+            c_max: self.c_max,
+            c_per_ip: self.c_per_ip,
+            q_max: self.q_max,
+            q_per_ip: self.q_per_ip,
+            b_max: self.b_max,
+            h_max: 65_536,
+            s_max: 10 << 20,
+            str_max: self.str_max,
+            d_limit: self.demand_limit,
+        };
+        let custom = crate::sched::Weights {
+            div: self.custom_div,
+            dem: self.custom_dem,
+            exc: self.custom_exc,
+            wait: self.custom_wait,
+            qpen: self.custom_qpen,
+            cpen: self.custom_cpen,
+        };
+        (limits, custom)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]

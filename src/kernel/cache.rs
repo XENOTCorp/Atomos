@@ -172,6 +172,11 @@ impl ResponseCache {
     }
 
     pub fn put(&self, method: Method, path: &str, query: &str, out: &Out) {
+        // Streaming bodies are never cacheable: the chunk receiver is
+        // single-use and the wire bytes are generated incrementally.
+        if matches!(out.body, crate::io::OutBody::Stream(_)) {
+            return;
+        }
         let (ttl_ms, name) = match &out.cache {
             CacheDirective::No => return,
             CacheDirective::Global { ttl_ms } => (*ttl_ms, None),

@@ -159,3 +159,115 @@ async fn h3_get_index() {
         String::from_utf8_lossy(&body)
     );
 }
+
+// --- Streaming (AsyncStreamModule) ---
+
+use atomos::flags::FlagSet;
+use atomos::io::{CacheDirective, Out, OutBody, StreamBody};
+use atomos::module::{AsyncStreamModule, BoxFut, Handler, ModuleMap};
+use atomos::status::Status;
+
+/// Echoes each request-body chunk straight into the response stream —
+/// data flows out as it comes in (no whole-body buffering).
+struct EchoStream;
+
+impl AsyncStreamModule for EchoStream {
+    fn name(&self) -> &'static str {
+        "stream"
+    }
+
+    fn handle_streaming<'a>(
+        &'a self,
+        _req: &'a http::Request<()>,
+        body: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) -> BoxFut<'a> {
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+            tokio::spawn(async move {
+                let mut body = body;
+                while let Some(c) = body.recv().await {
+                    if tx.send(c).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(Out {
+                status: Status::OK,
+                reason: None,
+                headers: vec![],
+                body: OutBody::Stream(StreamBody(std::sync::Arc::new(
+                    parking_lot::Mutex::new(Some(rx)),
+                ))),
+                cache: CacheDirective::No,
+                flags: FlagSet::empty(),
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h2c_streaming_echo() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), b"<h1>H2</h1>").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let cfg = Config::from_json(
+        format!(
+            r#"{{"bind":"127.0.0.1:{port}","static_root":"{}","memory_cap_bytes":6000000000,"workers":2,"cpu_pin":false,"engine":"tokio","http2":true,"http3":false}}"#,
+            dir.path().display()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let rules = Ruleset::parse(
+        br#"{"rules":[{"id":"s","module":"static","methods":["GET","HEAD"],"include":["/*"],"exclude":["/stream"]},{"id":"st","module":"stream","methods":["POST"],"include":["/stream"],"exclude":[]}]}"#,
+    )
+    .unwrap();
+    let (router, ctx, _) = static_router(cfg, rules);
+    // Register the streaming module (hot-swap into the modules map).
+    let mut m: ModuleMap = (**router.modules.load()).clone();
+    m.insert("stream".into(), Handler::Stream(std::sync::Arc::new(EchoStream)));
+    router.modules.store(std::sync::Arc::new(m));
+    tokio::spawn(async move {
+        let _ = serve::run(router, ctx).await;
+    });
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut h2, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    // POST /stream with a chunked body; each chunk is echoed back.
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("http://localhost/stream")
+        .body(())
+        .unwrap();
+    let (resp, mut send_body) = h2.send_request(req, false).expect("send");
+    let chunks: Vec<&[u8]> = vec![b"one-", b"two-", b"three"];
+    for c in chunks {
+        send_body
+            .send_data(bytes::Bytes::from_static(c), false)
+            .expect("data");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    send_body
+        .send_data(bytes::Bytes::new(), true)
+        .expect("eos");
+    let resp = resp.await.expect("resp");
+    assert_eq!(resp.status(), 200);
+    let mut recv = resp.into_body();
+    let mut body = Vec::new();
+    while let Some(c) = recv.data().await {
+        body.extend_from_slice(&c.expect("data"));
+    }
+    assert_eq!(body, b"one-two-three", "streamed echo must match the request body");
+}

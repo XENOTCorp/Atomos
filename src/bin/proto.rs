@@ -25,8 +25,25 @@ fn default_config() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("config.json"))
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+// Multi-thread runtime: the H2/H3 (tokio) paths spawn one task per
+// connection/stream; a single-threaded runtime serializes them all on
+// one core (measured: ~8k req/s H2 on 4 cores). worker_threads = the
+// machine's parallelism; pinning is handled by the OS scheduler here
+// (the H1 epoll engine does its own per-core pinning).
+fn main() {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(main_async());
+}
+
+async fn main_async() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

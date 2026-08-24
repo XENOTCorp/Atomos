@@ -33,6 +33,7 @@ pub use kernel::module;
 pub use kernel::num;
 pub use kernel::route;
 pub use kernel::rules;
+pub use kernel::sched;
 pub use kernel::static_mod;
 pub use kernel::status;
 pub use net::access_log;
@@ -92,6 +93,14 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
         allow_write: true,
         stop: Arc::new(LineAtomicU8::new(0)),
     });
+    let sched = {
+        let (limits, custom) = cfg.scheduler.build();
+        Arc::new(parking_lot::Mutex::new(crate::sched::Sched::new(
+            cfg.scheduler.mode,
+            custom,
+            limits,
+        )))
+    };
     let router = Arc::new(Router {
         cache: ResponseCache::new(cfg.cache_entries, cfg.cache_bytes),
         gov: Governor::from_config(&cfg),
@@ -102,6 +111,7 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
         post: None,
         metrics,
         cfg: Arc::new(cfg),
+        sched,
     });
     (router, ctx, st)
 }
