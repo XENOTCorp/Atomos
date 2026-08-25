@@ -172,9 +172,21 @@ impl IpState {
     /// 1/8): a naive `(7D+n)>>3` on integer D can never leave 0
     /// (truncation), so the equivalent `D += n - (D>>3)` form is used,
     /// and demand thresholds/priotities compare against `limit << 3`.
+    ///
+    /// Band invariant (thesis NT62; machine-checked in Lean
+    /// `docs/paper/lean/Scheduler.lean`): for sustained rate `n` the
+    /// fixed point is `8n` and the invariant band is `[8n, 8n+7]`. The
+    /// `debug_assert` machine-checks the in-band direction (an in-band
+    /// state stays in-band); out-of-band states (cold start, deliberate
+    /// test pokes) are outside the theorem's hypothesis and not claimed.
     #[inline]
     pub fn demand_update(&mut self, n: u32) {
+        let in_band = (self.demand as u64) <= (8 * n as u64) + 7;
         self.demand = self.demand.wrapping_add(n).wrapping_sub(self.demand >> EMA_SHIFT);
+        debug_assert!(
+            !in_band || (self.demand as u64) <= (8 * n as u64) + 7,
+            "NT62: EMA band [8n, 8n+7] is invariant under the in-band update"
+        );
     }
 }
 
@@ -622,5 +634,56 @@ mod tests {
         let p_young = s.priority(k, 1);
         let p_old = s.priority(k, 100);
         assert!(p_old > p_young);
+    }
+
+    #[test]
+    fn ema_band_is_invariant_and_attracting() {
+        // Thesis NT62 (Lean Scheduler.lean): f(x) = x + n - x/8 keeps
+        // the band [8n, 8n+7] invariant and attracts every state.
+        // (a) exhaustive in-band check for small n.
+        for n in 0u32..=8 {
+            let hi = 8 * n + 7;
+            for d in 0..=hi {
+                let mut st = IpState {
+                    demand: d,
+                    ..Default::default()
+                };
+                st.demand_update(n);
+                assert!(st.demand <= hi, "n={n} d={d} -> {}", st.demand);
+            }
+        }
+        // (b) attraction: from any start, 256 updates at n=1 land in
+        // the band [8, 15] and stay there.
+        for start in [0u32, 1, 7, 8, 15, 100, 10_000, 500_000_000] {
+            let mut st = IpState {
+                demand: start,
+                ..Default::default()
+            };
+            for _ in 0..256 {
+                st.demand_update(1);
+            }
+            assert!((8..=15).contains(&st.demand), "start={start} -> {}", st.demand);
+        }
+    }
+
+    #[test]
+    fn decay_cycle_contracts_into_attractor() {
+        // NT62 cycle: tick_decay (d -> (7d)>>3) between requests keeps
+        // the firewall datapath inside [7, 13] once it is there, and
+        // pulls higher states down into it.
+        for d in 7u32..=64 {
+            let mut s = Sched::new(RuleMode::Anarchy, Weights::default(), Limits::default());
+            let k = Sched::ip_key(ip(10, 10, 10, 10));
+            s.entry(k).demand = d;
+            for _ in 0..64 {
+                s.tick_decay();
+                s.entry(k).demand_update(1);
+            }
+            assert!(
+                (7..=13).contains(&s.state(k).demand),
+                "d={d} -> {}",
+                s.state(k).demand
+            );
+        }
     }
 }

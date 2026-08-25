@@ -1,9 +1,42 @@
 //! Disjoint path rules. No regex. Load-time overlap is an error.
-//! Runtime match O(R), no heap. Criticality C2.
+//! Criticality C2.
+//!
+//! Matching strategy (thesis NT58/NT65: affine crossover theorem, NT59:
+//! measured lattice minimum). The rule languages are disjoint exact and
+//! `pre/*` prefix patterns, hence a regular language over path bytes.
+//! Two realizations are available:
+//!
+//! * **Linear scan** — `O(R·L)` byte comparisons over a cache-friendly
+//!   array; the minimum for small rule counts R (the bench config with
+//!   R=2 never pays for a trie).
+//! * **Path trie** — a deterministic automaton (one node per distinct
+//!   pattern prefix; Myhill–Nerode refinement), `O(L)` worst case, no
+//!   backtracking, no heap. The minimum for large R.
+//!
+//! [`Ruleset`] picks the realization whose fitted affine cost is lower
+//! at load time: trie iff `R ≥ TRIE_MIN_RULES` (the measured crossover;
+//! see `bench-results/route-crossover.txt`), capped at 64 rules (the
+//! exclude bookkeeping is a `u64` mask) and 16 KiB of pattern bytes.
 
 use serde::Deserialize;
 
 use crate::io::Method;
+
+/// Trie realization below this rule count loses to the linear scan.
+/// Measured crossover (release build, `cargo test --release -- --ignored
+/// crossover_scan_vs_trie`, recorded in bench-results/route-crossover):
+/// scan is affine in R (~4.2 ns/rule; 5.9 ns at R=2, 25.8 at R=8, 59.6
+/// at R=16) while the automaton is flat (~35–44 ns); the fitted
+/// crossover is R≈10–12, and on the measured grid {2,4,8,16,…} the trie
+/// first wins at R=16 — the lattice minimum (thesis NT58/NT59). The
+/// production configs in `templates/` (R ≤ 8) therefore keep the scan,
+/// which the theorem says is the cheaper realization there.
+const TRIE_MIN_RULES: usize = 16;
+/// Trie realize at most 64 rules: exclusion tracking is a `u64` mask.
+const TRIE_MAX_RULES: usize = 64;
+/// Construction guard: total pattern bytes (the trie is worth its
+/// memory only for small rule sets; larger ones stay on the scan).
+const TRIE_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuleError {
@@ -83,6 +116,9 @@ struct File {
 #[derive(Clone, Debug)]
 pub struct Ruleset {
     pub rules: Box<[Rule]>,
+    /// Trie realization, built at load time when the crossover theorem
+    /// says it beats the linear scan (see module docs).
+    trie: Option<PathTrie>,
 }
 
 const MAX_RULES: usize = 256;
@@ -100,10 +136,8 @@ impl Ruleset {
         if rules.len() > MAX_RULES {
             return Err(RuleError::TooMany);
         }
-        let s = Self {
-            rules: rules.into_boxed_slice(),
-        };
-        s.assert_disjoint()?;
+        let rules = rules.into_boxed_slice();
+        let s = Self::build(rules)?;
         Ok(s)
     }
 
@@ -121,21 +155,73 @@ impl Ruleset {
             }
             packed.push(pack_rule(w));
         }
+        Self::build(packed.into_boxed_slice())
+    }
+
+    /// Shared constructor: disjointness is a load-time theorem the trie
+    /// relies on (two rules can never terminate the same path), so it is
+    /// asserted before the automaton is derived.
+    fn build(rules: Box<[Rule]>) -> Result<Self, RuleError> {
+        Self::build_inner(rules, false)
+    }
+
+    /// Measurement constructor (crossover bench): always derive the
+    /// automaton when it fits, ignoring the scan-vs-trie threshold.
+    #[cfg(test)]
+    pub(crate) fn from_rules_forced(rules: Vec<Rule>) -> Result<Self, RuleError> {
+        if rules.len() > MAX_RULES {
+            return Err(RuleError::TooMany);
+        }
+        Self::build_inner(rules.into_boxed_slice(), true)
+    }
+
+    fn build_inner(rules: Box<[Rule]>, force: bool) -> Result<Self, RuleError> {
         let s = Self {
-            rules: packed.into_boxed_slice(),
+            rules,
+            trie: None,
         };
         s.assert_disjoint()?;
-        Ok(s)
+        let trie = if force {
+            PathTrie::build(&s.rules, 0)
+        } else {
+            PathTrie::build(&s.rules, TRIE_MIN_RULES)
+        };
+        Ok(Self {
+            trie,
+            ..s
+        })
     }
 
     pub fn match_path(&self, method: &str, path: &str) -> Option<&Rule> {
         let bit = Method::parse(method).map(Method::bit).unwrap_or(0);
-        self.rules.iter().find(|r| rule_matches(r, bit, path))
+        self.match_bit(bit, path)
     }
 
     pub fn match_method(&self, method: Method, path: &str) -> Option<&Rule> {
         let bit = method.bit();
+        self.match_bit(bit, path)
+    }
+
+    fn match_bit(&self, bit: u16, path: &str) -> Option<&Rule> {
+        if let Some(t) = &self.trie {
+            t.match_rule(bit, path).map(|i| &self.rules[i])
+        } else {
+            self.rules.iter().find(|r| rule_matches(r, bit, path))
+        }
+    }
+
+    /// The linear-scan realization (thesis NT58): O(R·L), no heap. The
+    /// automaton realization is picked automatically at load time; this
+    /// method exists for the equivalence tests and the crossover
+    /// measurement, and is always correct.
+    pub fn match_linear(&self, method: Method, path: &str) -> Option<&Rule> {
+        let bit = method.bit();
         self.rules.iter().find(|r| rule_matches(r, bit, path))
+    }
+
+    /// True when the automaton realization is active.
+    pub fn trie_active(&self) -> bool {
+        self.trie.is_some()
     }
 
     pub fn assert_disjoint(&self) -> Result<(), RuleError> {
@@ -159,6 +245,179 @@ impl Ruleset {
             }
         }
         Ok(())
+    }
+}
+
+/// One trie node: byte transitions plus the terminals ending here.
+///
+/// Terminals are split by pattern kind because their firing rules
+/// differ: a `pre/*` prefix pattern fires the moment the walk *visits*
+/// its node (any longer path still starts with `pre/`), while an exact
+/// pattern fires only when the walk *ends* at its node.
+#[derive(Clone, Debug, Default)]
+struct TrieNode {
+    /// Sorted `(byte, child)` transitions; deterministic on the byte.
+    children: Vec<(u8, u32)>,
+    /// Prefix includes ending here: `(rule index, method mask)`.
+    prefix_terms: Vec<(u16, u16)>,
+    /// Prefix excludes ending here: rule indices.
+    prefix_excludes: Vec<u16>,
+    /// Exact includes ending here: `(rule index, method mask)`.
+    exact_terms: Vec<(u16, u16)>,
+    /// Exact excludes ending here: rule indices.
+    exact_excludes: Vec<u16>,
+}
+
+/// Deterministic automaton over the disjoint rule languages (thesis
+/// NT65): matching is one transition per path byte, O(L), no heap, no
+/// backtracking. Node 0 is the root.
+#[derive(Clone, Debug)]
+struct PathTrie {
+    nodes: Vec<TrieNode>,
+}
+
+impl PathTrie {
+    /// Build the automaton, or `None` when the affine crossover says the
+    /// linear scan is cheaper (NT58: cost_scan(R) = a·R·L̄ + b vs
+    /// cost_trie(L̄); for R below the measured crossover the scan wins).
+    /// `min_rules` is the crossover threshold (0 forces the automaton
+    /// for the measurement constructor).
+    fn build(rules: &[Rule], min_rules: usize) -> Option<PathTrie> {
+        let n = rules.len();
+        if n < min_rules || n > TRIE_MAX_RULES {
+            return None;
+        }
+        let mut bytes = 0usize;
+        for r in rules {
+            for p in r.include.iter().chain(r.exclude.iter()) {
+                bytes += pattern_len(p);
+            }
+        }
+        if bytes > TRIE_MAX_BYTES {
+            return None;
+        }
+        let mut t = PathTrie {
+            nodes: vec![TrieNode::default()],
+        };
+        for (ri, r) in rules.iter().enumerate() {
+            let ri = ri as u16;
+            for p in r.include.iter() {
+                let node = match p.kind {
+                    PatKind::Prefix => t.insert_pre(p.bytes.as_bytes()),
+                    PatKind::Exact => t.insert(p.bytes.as_bytes()),
+                };
+                match p.kind {
+                    PatKind::Prefix => t.nodes[node].prefix_terms.push((ri, r.methods)),
+                    PatKind::Exact => t.nodes[node].exact_terms.push((ri, r.methods)),
+                }
+            }
+            for p in r.exclude.iter() {
+                let node = match p.kind {
+                    PatKind::Prefix => t.insert_pre(p.bytes.as_bytes()),
+                    PatKind::Exact => t.insert(p.bytes.as_bytes()),
+                };
+                match p.kind {
+                    PatKind::Prefix => t.nodes[node].prefix_excludes.push(ri),
+                    PatKind::Exact => t.nodes[node].exact_excludes.push(ri),
+                }
+            }
+        }
+        Some(t)
+    }
+
+    /// One pass over the path bytes; `cand` is the first include
+    /// terminal whose method mask admits the request (at most one rule
+    /// can ever match a path — `assert_disjoint` is the load-time
+    /// theorem this relies on). An exclude of the candidate anywhere on
+    /// the path vetoes the match, mirroring `pat_match` exactly: prefix
+    /// excludes fire when visited, exact excludes only at the final
+    /// node.
+    fn match_rule(&self, bit: u16, path: &str) -> Option<usize> {
+        let mut node = 0usize;
+        let mut cand: Option<u16> = None;
+        let mut exc_seen: u64 = 0;
+        for &b in path.as_bytes() {
+            let Some(next) = self.descend(node, b) else {
+                break;
+            };
+            node = next;
+            let n = &self.nodes[node];
+            for &r in &n.prefix_excludes {
+                exc_seen |= 1u64 << r;
+            }
+            if cand.is_none() {
+                for &(r, m) in &n.prefix_terms {
+                    if m & bit != 0 {
+                        cand = Some(r);
+                        break;
+                    }
+                }
+            }
+        }
+        let n = &self.nodes[node];
+        for &r in &n.exact_excludes {
+            exc_seen |= 1u64 << r;
+        }
+        if cand.is_none() {
+            for &(r, m) in &n.exact_terms {
+                if m & bit != 0 {
+                    cand = Some(r);
+                    break;
+                }
+            }
+        }
+        let r = cand?;
+        if exc_seen & (1u64 << r) != 0 {
+            return None;
+        }
+        Some(r as usize)
+    }
+
+    /// Descend one byte: binary search over the sorted transition list.
+    fn descend(&self, node: usize, b: u8) -> Option<usize> {
+        let ch = &self.nodes[node].children;
+        let idx = ch.partition_point(|&(c, _)| c < b);
+        (idx < ch.len() && ch[idx].0 == b).then(|| ch[idx].1 as usize)
+    }
+
+    /// Insert a byte path, creating nodes as needed; returns the
+    /// terminal node id.
+    fn insert(&mut self, bytes: &[u8]) -> usize {
+        let mut node = 0usize;
+        for &b in bytes {
+            node = self.insert_byte(node, b);
+        }
+        node
+    }
+
+    /// `pre/*` patterns occupy `pre + "/"` in the automaton (the walk
+    /// can stop the moment the slash after `pre` is consumed; an empty
+    /// `pre` is just `/`), mirroring [`pat_match`].
+    fn insert_pre(&mut self, pre: &[u8]) -> usize {
+        let node = self.insert(pre);
+        self.insert_byte(node, b'/')
+    }
+
+    /// Single-byte descend-or-create.
+    fn insert_byte(&mut self, node: usize, b: u8) -> usize {
+        match self.nodes[node].children.binary_search_by_key(&b, |&(c, _)| c) {
+            Ok(i) => self.nodes[node].children[i].1 as usize,
+            Err(i) => {
+                let id = self.nodes.len() as u32;
+                self.nodes.push(TrieNode::default());
+                self.nodes[node].children.insert(i, (b, id));
+                id as usize
+            }
+        }
+    }
+}
+
+/// Pattern length in the automaton: exact = its own bytes, prefix =
+/// `pre + "/"`. Used for the construction cost guard.
+fn pattern_len(p: &Pat) -> usize {
+    match p.kind {
+        PatKind::Prefix => p.bytes.len() + 1,
+        PatKind::Exact => p.bytes.len(),
     }
 }
 
@@ -348,5 +607,193 @@ mod tests {
         assert_eq!(std::mem::align_of::<Rule>(), 64);
         assert_eq!(std::mem::align_of::<Ruleset>(), 64);
         assert!(std::mem::size_of::<Rule>() >= 64);
+    }
+
+    // --- automaton realization (thesis NT65) ---
+
+    fn mk_rule(id: &str, methods: u16, inc: &[&str], exc: &[&str]) -> Rule {
+        Rule {
+            methods,
+            _pad: [0; 6],
+            include: inc.iter().map(|s| pack_pat((*s).to_string())).collect(),
+            exclude: exc.iter().map(|s| pack_pat((*s).to_string())).collect(),
+            id: id.into(),
+            module: id.into(),
+            headers: Box::new([]),
+        }
+    }
+
+    /// 40 pairwise-disjoint GET prefix rules: `/r{i}/*`.
+    fn forty_rules() -> Vec<Rule> {
+        (0..40)
+            .map(|i| mk_rule(&format!("r{i}"), Method::Get.bit(), &[&format!("/r{i}/*")], &[]))
+            .collect()
+    }
+
+    #[test]
+    fn small_rule_sets_keep_the_linear_scan() {
+        // The bench config (R=2) must never pay for a trie (NT58).
+        let rs = Ruleset::from_rules(vec![
+            mk_rule("s", METHODS_ALL, &["/*"], &["/api/*"]),
+            mk_rule("a", METHODS_ALL, &["/api/*"], &[]),
+        ])
+        .unwrap();
+        assert!(!rs.trie_active());
+    }
+
+    #[test]
+    fn large_rule_sets_use_the_automaton() {
+        let rs = Ruleset::from_rules(forty_rules()).unwrap();
+        assert!(rs.trie_active());
+        for i in 0..40 {
+            let r = rs.match_method(Method::Get, &format!("/r{i}/x")).unwrap();
+            assert_eq!(&*r.id, format!("r{i}"));
+        }
+        // A path outside every pattern matches nothing.
+        assert!(rs.match_method(Method::Get, "/nope/xyz").is_none());
+        // Prefix boundary: "/r3" without a trailing slash segment.
+        assert!(rs.match_method(Method::Get, "/r3").is_none());
+        assert!(rs.match_method(Method::Get, "/r3/").is_some());
+    }
+
+    #[test]
+    fn method_split_patterns_are_disjoint_by_method() {
+        let rs = Ruleset::from_rules(vec![
+            mk_rule("g", Method::Get.bit(), &["/api/*"], &[]),
+            mk_rule("p", Method::Post.bit(), &["/api/*"], &[]),
+        ])
+        .unwrap();
+        // Too small for the trie — verify with the forced constructor too.
+        let rs_t = Ruleset::from_rules_forced(vec![
+            mk_rule("g", Method::Get.bit(), &["/api/*"], &[]),
+            mk_rule("p", Method::Post.bit(), &["/api/*"], &[]),
+        ])
+        .unwrap();
+        assert!(rs_t.trie_active());
+        for rs in [&rs, &rs_t] {
+            assert_eq!(&*rs.match_method(Method::Get, "/api/x").unwrap().id, "g");
+            assert_eq!(&*rs.match_method(Method::Post, "/api/x").unwrap().id, "p");
+            assert!(rs.match_method(Method::Put, "/api/x").is_none());
+        }
+    }
+
+    #[test]
+    fn prefix_exclude_deeper_than_include_vetoes() {
+        // The walk fires the "/api/*" include terminal, then must keep
+        // walking to see the "/api/private/*" exclude (thesis NT65:
+        // exclusion is a bit in the running mask, not an early return).
+        let mut rules = forty_rules();
+        rules.push(mk_rule(
+            "api",
+            Method::Get.bit(),
+            &["/api/*"],
+            &["/api/private/*"],
+        ));
+        // "/api/*" and "/r{i}/*" never overlap; push a disjoint catch-all
+        // is NOT possible, so this is the only "/api" rule.
+        let rs = Ruleset::from_rules_forced(rules).unwrap();
+        assert!(rs.trie_active());
+        assert_eq!(&*rs.match_method(Method::Get, "/api/public/x").unwrap().id, "api");
+        assert!(rs.match_method(Method::Get, "/api/private/x").is_none());
+        // "/api/private" itself is NOT under the exclude (pat_match needs
+        // len > len(pre) and a '/' at len(pre)); the scan agrees.
+        assert!(rs.match_method(Method::Get, "/api/private").is_some());
+    }
+
+    #[test]
+    fn exact_exclude_fires_only_at_path_end() {
+        let mut rules = forty_rules();
+        rules.push(mk_rule(
+            "api",
+            Method::Get.bit(),
+            &["/api/*"],
+            &["/api/x"],
+        ));
+        let rs = Ruleset::from_rules_forced(rules).unwrap();
+        assert_eq!(&*rs.match_method(Method::Get, "/api/y").unwrap().id, "api");
+        // "/api/x" exactly: the include prefix fires, then the exact
+        // exclude terminal sits at the final node -> veto.
+        assert!(rs.match_method(Method::Get, "/api/x").is_none());
+        // "/apix" shares bytes but neither the exclude nor the include.
+        assert!(rs.match_method(Method::Get, "/apix").is_none());
+    }
+
+    #[test]
+    fn catchall_star_matches_everything() {
+        let mut rules = forty_rules();
+        rules.push(mk_rule("catch", Method::Get.bit(), &["/*"], &[]));
+        // "/*" overlaps every GET rule -> parse error (load-time theorem).
+        assert!(Ruleset::from_rules_forced(rules).is_err());
+    }
+
+    #[test]
+    fn automaton_equals_linear_scan_on_fuzz() {
+        let rs = Ruleset::from_rules_forced(forty_rules()).unwrap();
+        assert!(rs.trie_active());
+        // Deterministic PRNG (xorshift) — no external deps in tests.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200_000 {
+            let r = (next() % 40) as usize;
+            let mut path = format!("/r{r}/");
+            for _ in 0..(next() % 4) {
+                path.push((b'a' + (next() % 26) as u8) as char);
+            }
+            // Occasionally hit prefix boundaries and non-matching paths.
+            let path = match next() % 10 {
+                0 => format!("/r{r}"),
+                1 => format!("/r{r}/"),
+                2 => "/other/x".to_string(),
+                3 => "/r".to_string(),
+                _ => path,
+            };
+            let m = next() % 3;
+            let method = match m {
+                0 => Method::Get,
+                1 => Method::Post,
+                _ => Method::Delete,
+            };
+            let a = rs.match_method(method, &path).map(|r| r.id.as_ref());
+            let b = rs.match_linear(method, &path).map(|r| r.id.as_ref());
+            assert_eq!(a, b, "disagreement on {method:?} {path:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "crossover measurement; run with `cargo test -- --ignored`"]
+    fn crossover_scan_vs_trie() {
+        // Affine crossover (NT58) measured directly: time the scan and
+        // the automaton on identical rule sets and identical paths, and
+        // print the crossing. The observed crossover justifies
+        // TRIE_MIN_RULES. No timing assertions (hardware noise).
+        let path = "/r17/a/b/c/d/e/f/g/h";
+        println!("{:>4} {:>10} {:>10}  winner", "R", "scan ns", "trie ns");
+        for &r in &[2usize, 4, 8, 16, 24, 32, 40, 48, 56, 63] {
+            let rules: Vec<Rule> = (0..r)
+                .map(|i| mk_rule(&format!("r{i}"), Method::Get.bit(), &[&format!("/r{i}/*")], &[]))
+                .collect();
+            let rs = Ruleset::from_rules_forced(rules).unwrap();
+            assert!(rs.trie_active());
+            let iters = 200_000u32;
+            let t0 = std::time::Instant::now();
+            let mut acc = 0usize;
+            for _ in 0..iters {
+                acc += rs.match_linear(Method::Get, path).is_some() as usize;
+            }
+            let scan = t0.elapsed().as_nanos() as f64 / iters as f64;
+            let t1 = std::time::Instant::now();
+            for _ in 0..iters {
+                acc += rs.match_method(Method::Get, path).is_some() as usize;
+            }
+            let trie = t1.elapsed().as_nanos() as f64 / iters as f64;
+            std::hint::black_box(acc);
+            let winner = if scan < trie { "scan" } else { "trie" };
+            println!("{r:>4} {scan:>10.1} {trie:>10.1}  {winner}");
+        }
     }
 }
