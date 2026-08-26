@@ -79,17 +79,20 @@ async fn h2_get_lat(h2: &mut SendRequest<Bytes>, uri: &str) -> (u64, u16) {
 }
 
 /// Read a numeric counter from the server's Prometheus /metrics.
-async fn metric(h2_addr: SocketAddr, name: &str) -> u64 {
+/// `None` when the server has no metrics route; the HPACK proxy phase
+/// then skips instead of aborting the bench.
+async fn metric(h2_addr: SocketAddr, name: &str) -> Option<u64> {
     let mut h2 = h2_connect(h2_addr).await;
     let (status, body) = h2_get_body(&mut h2, "/metrics").await;
-    assert_eq!(status, 200, "/metrics returned {status}");
     drop(h2);
+    if status != 200 {
+        return None;
+    }
     let needle = format!("{name} ");
     String::from_utf8_lossy(&body)
         .lines()
         .find_map(|l| l.strip_prefix(&needle))
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or_else(|| panic!("counter {name} not in /metrics"))
 }
 
 async fn h2_phase(addr: SocketAddr, count: usize) {
@@ -171,21 +174,25 @@ async fn h2_phase(addr: SocketAddr, count: usize) {
     drop(h2);
 
     // HPACK proxy via /metrics wire deltas (counting IO wrapper).
-    let before = metric(addr, "atomos_h2_wire_in").await;
+    // Skipped when the server has no metrics route.
+    let Some(before) = metric(addr, "atomos_h2_wire_in").await else {
+        println!("hpack-proxy: skipped (server does not serve /metrics)");
+        return;
+    };
     let mut load = h2_connect(addr).await;
     let (_, s) = h2_get_lat(&mut load, "/").await;
     assert_eq!(s, 200);
     drop(load);
-    let mid = metric(addr, "atomos_h2_wire_in").await;
+    let mid = metric(addr, "atomos_h2_wire_in").await.unwrap();
     let mut load = h2_connect(addr).await;
     for _ in 0..500 {
         let (_, s) = h2_get_lat(&mut load, "/").await;
         assert_eq!(s, 200);
     }
     drop(load);
-    let after = metric(addr, "atomos_h2_wire_in").await;
-    let streams = (metric(addr, "atomos_h2_streams").await) as i64;
-    let raw = (metric(addr, "atomos_h2_headers_raw").await) as i64;
+    let after = metric(addr, "atomos_h2_wire_in").await.unwrap();
+    let streams = metric(addr, "atomos_h2_streams").await.unwrap() as i64;
+    let raw = metric(addr, "atomos_h2_headers_raw").await.unwrap() as i64;
     let first_wire = (mid - before) as i64;
     let steady_wire = (after - mid) as i64 / 500;
     let raw_per = raw / streams.max(1);
@@ -251,6 +258,24 @@ async fn h3_phase(addr: SocketAddr, count: usize) {
         pct(lat.clone(), 0.99) as f64 / 1e3,
         pct(lat, 0.999) as f64 / 1e3,
     );
+
+    // 64-in-flight multiplexed throughput on the same connection.
+    let t0 = Instant::now();
+    let mut done = 0usize;
+    while done < count {
+        let batch = (count - done).min(64);
+        let mut tasks = Vec::with_capacity(batch);
+        for _ in 0..batch {
+            let mut s = send.clone();
+            tasks.push(tokio::spawn(async move { get_once(&mut s).await }));
+        }
+        for t in tasks {
+            t.await.expect("h3 mux task");
+            done += 1;
+        }
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    println!("mux x64: {:.0} req/s (single connection)", count as f64 / wall);
 }
 
 /// rustls verifier that accepts the server's self-signed cert (bench

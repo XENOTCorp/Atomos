@@ -28,24 +28,25 @@ file:
 
 | Server | Cached page | 64 KiB file |
 | --- | --- | --- |
-| Atomos H1 (FDS epoll) | 95,061 req/s | 26,148 req/s (1.60 GB/s) |
-| h2o 2.2.6 | 85,016 req/s | 26,558 req/s (1.63 GB/s) |
-| nginx 1.30.4 (open_file_cache) | 67,663 req/s | 34,142 req/s (2.09 GB/s) |
-| Hyper 1 (tokio) | 40,089 req/s | 18,481 req/s (1.13 GB/s) |
-| Caddy 2.11.4 | 18,457 req/s | 15,185 req/s (0.93 GB/s) |
-| Seastar httpd | 10,137 req/s | 2,352 req/s (147.6 MB/s) |
-| axum 0.8 | 2,540 req/s | 9,772 req/s (612.5 MB/s) |
-| actix-web 4 | 2,526 req/s | 11,716 req/s (735.4 MB/s) |
+| Atomos H1 (FDS epoll) | 100,328 req/s | 27,848 req/s (1.70 GB/s) |
+| h2o 2.2.6 | 86,755 req/s | 26,791 req/s (1.64 GB/s) |
+| nginx 1.30.4 (open_file_cache) | 70,379 req/s | 33,805 req/s (2.07 GB/s) |
+| Hyper 1 (tokio) | 41,024 req/s | 18,688 req/s (1.14 GB/s) |
+| Caddy 2.11.4 | 18,513 req/s | 15,194 req/s (0.93 GB/s) |
+| Seastar httpd | 10,334 req/s | 2,412 req/s (151.5 MB/s) |
+| axum 0.8 | 2,533 req/s | 9,751 req/s (611.2 MB/s) |
+| actix-web 4 | 2,514 req/s | 15,633 req/s (959.3 MB/s) |
 
 Notes:
 
 - The cached page for Atomos, h2o, and nginx is an in-memory response
-  path: Atomos and h2o use a wire cache, nginx uses `return 200` plus
-  `open_file_cache`. axum and Hyper read the file per request.
+  path: Atomos and h2o use a wire cache, nginx uses `open_file_cache`
+  on its static path. axum and Hyper read the file per request.
 - On the 64 KiB file, nginx's sendfile leads; Atomos and h2o are at
   parity on the byte path.
 - Seastar's httpd demo serves files through its directory handler
-  without a response cache.
+  (`/file/<name>`, mapped to the filesystem root) without a response
+  cache.
 
 ## HTTP/1.1 latency percentiles
 
@@ -53,13 +54,13 @@ Fresh connection per request, `curl` total time, 200 samples:
 
 | Server | p10 | p50 | p90 | p99 | p999 | mean |
 | --- | --- | --- | --- | --- | --- | --- |
-| Atomos H1 | 255 | 291 | 354 | 1571 | 2216 | 329.5 |
-| nginx | 288 | 321 | 372 | 657 | 1444 | 333.1 |
-| h2o | 325 | 344 | 407 | 831 | 1114 | 365.4 |
-| Seastar | 338 | 377 | 593 | 2552 | 2585 | 448.0 |
-| Hyper | 354 | 403 | 482 | 934 | 1120 | 419.2 |
-| axum | 471 | 548 | 680 | 1198 | 1298 | 571.5 |
-| Caddy | 517 | 559 | 647 | 1121 | 1125 | 586.7 |
+| Atomos H1 | 259 | 291 | 337 | 1484 | 2468 | 321.5 |
+| nginx | 292 | 323 | 366 | 601 | 677 | 330.6 |
+| h2o | 329 | 343 | 385 | 913 | 1091 | 362.1 |
+| Seastar | 584 | 669 | 1302 | 2750 | 2772 | 835.5 |
+| Hyper | 355 | 393 | 457 | 1004 | 1144 | 411.6 |
+| axum | 444 | 498 | 593 | 1393 | 2011 | 523.9 |
+| Caddy | 515 | 549 | 600 | 1471 | 1778 | 568.6 |
 
 All values are microseconds.
 
@@ -70,8 +71,8 @@ All values are microseconds.
 
 | Server | Multiplexed | Sequential |
 | --- | --- | --- |
-| h2o 2.2.6 | 288,497 req/s | 18,063 req/s |
-| Atomos (atomos-proto, h2c) | 152,924 req/s | 17,229 req/s |
+| h2o 2.2.6 | 254,079 req/s | 18,332 req/s |
+| Atomos (atomos-proto, h2c) | 166,761 req/s | 16,364 req/s |
 | nghttpd (nghttp2) | not comparable | not comparable |
 
 nghttpd returned 404 for `/` (no index handling) in every request, so
@@ -85,8 +86,8 @@ client):
 
 | Mode | Throughput | p50 | p99 |
 | --- | --- | --- | --- |
-| Sequential | 5,004 req/s | 184.8 µs | 362.5 µs |
-| Multiplexed (64 streams) | 19,505 req/s | - | - |
+| Sequential | 7,225 req/s | 123.4 µs | 427.0 µs |
+| Multiplexed (64 streams) | 38,071 req/s | - | - |
 
 A head-to-head HTTP/3 comparison against nghttpx or quiche was not
 measurable on this platform: the `h2load` QUIC client and the
