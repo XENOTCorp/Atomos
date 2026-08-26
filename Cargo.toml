@@ -9,7 +9,6 @@ description = "Barebones HTTP kernel: disjoint JSON rules, modules, atoms, opera
 readme = "README.md"
 keywords = ["http", "http2", "http3", "server"]
 categories = ["network-programming", "web-programming::http-server"]
-publish = false
 
 [lib]
 name = "atomos"

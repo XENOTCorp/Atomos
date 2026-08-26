@@ -173,7 +173,7 @@ impl IpState {
     /// (truncation), so the equivalent `D += n - (D>>3)` form is used,
     /// and demand thresholds/priotities compare against `limit << 3`.
     ///
-    /// Band invariant (thesis NT62; machine-checked in Lean
+    /// Band invariant (; machine-checked in Lean
     /// `docs/paper/lean/Scheduler.lean`): for sustained rate `n` the
     /// fixed point is `8n` and the invariant band is `[8n, 8n+7]`. The
     /// `debug_assert` machine-checks the in-band direction (an in-band
@@ -185,7 +185,7 @@ impl IpState {
         self.demand = self.demand.wrapping_add(n).wrapping_sub(self.demand >> EMA_SHIFT);
         debug_assert!(
             !in_band || (self.demand as u64) <= (8 * n as u64) + 7,
-            "NT62: EMA band [8n, 8n+7] is invariant under the in-band update"
+            "EMA band [8n, 8n+7] is invariant under the in-band update"
         );
     }
 }
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn ema_band_is_invariant_and_attracting() {
-        // Thesis NT62 (Lean Scheduler.lean): f(x) = x + n - x/8 keeps
+        // f(x) = x + n - x/8 keeps
         // the band [8n, 8n+7] invariant and attracts every state.
         // (a) exhaustive in-band check for small n.
         for n in 0u32..=8 {
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn decay_cycle_contracts_into_attractor() {
-        // NT62 cycle: tick_decay (d -> (7d)>>3) between requests keeps
+        // cycle: tick_decay (d -> (7d)>>3) between requests keeps
         // the firewall datapath inside [7, 13] once it is there, and
         // pulls higher states down into it.
         for d in 7u32..=64 {

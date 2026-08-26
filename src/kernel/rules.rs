@@ -1,7 +1,7 @@
 //! Disjoint path rules. No regex. Load-time overlap is an error.
 //! Criticality C2.
 //!
-//! Matching strategy (thesis NT58/NT65: affine crossover theorem, NT59:
+//! Matching strategy (affine crossover theorem,
 //! measured lattice minimum). The rule languages are disjoint exact and
 //! `pre/*` prefix patterns, hence a regular language over path bytes.
 //! Two realizations are available:
@@ -28,7 +28,7 @@ use crate::io::Method;
 /// scan is affine in R (~4.2 ns/rule; 5.9 ns at R=2, 25.8 at R=8, 59.6
 /// at R=16) while the automaton is flat (~35–44 ns); the fitted
 /// crossover is R≈10–12, and on the measured grid {2,4,8,16,…} the trie
-/// first wins at R=16 — the lattice minimum (thesis NT58/NT59). The
+/// first wins at R=16 — the lattice minimum. The
 /// production configs in `templates/` (R ≤ 8) therefore keep the scan,
 /// which the theorem says is the cheaper realization there.
 const TRIE_MIN_RULES: usize = 16;
@@ -210,7 +210,7 @@ impl Ruleset {
         }
     }
 
-    /// The linear-scan realization (thesis NT58): O(R·L), no heap. The
+    /// The linear-scan realization: O(R·L), no heap. The
     /// automaton realization is picked automatically at load time; this
     /// method exists for the equivalence tests and the crossover
     /// measurement, and is always correct.
@@ -268,8 +268,8 @@ struct TrieNode {
     exact_excludes: Vec<u16>,
 }
 
-/// Deterministic automaton over the disjoint rule languages (thesis
-/// NT65): matching is one transition per path byte, O(L), no heap, no
+/// Deterministic automaton over the disjoint rule languages.
+/// Matching is one transition per path byte, O(L), no heap, no
 /// backtracking. Node 0 is the root.
 #[derive(Clone, Debug)]
 struct PathTrie {
@@ -278,7 +278,7 @@ struct PathTrie {
 
 impl PathTrie {
     /// Build the automaton, or `None` when the affine crossover says the
-    /// linear scan is cheaper (NT58: cost_scan(R) = a·R·L̄ + b vs
+    /// linear scan is cheaper (cost_scan(R) = a·R·L̄ + b vs
     /// cost_trie(L̄); for R below the measured crossover the scan wins).
     /// `min_rules` is the crossover threshold (0 forces the automaton
     /// for the measurement constructor).
@@ -609,7 +609,7 @@ mod tests {
         assert!(std::mem::size_of::<Rule>() >= 64);
     }
 
-    // --- automaton realization (thesis NT65) ---
+    // --- automaton realization ---
 
     fn mk_rule(id: &str, methods: u16, inc: &[&str], exc: &[&str]) -> Rule {
         Rule {
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn small_rule_sets_keep_the_linear_scan() {
-        // The bench config (R=2) must never pay for a trie (NT58).
+        // The bench config (R=2) must never pay for a trie.
         let rs = Ruleset::from_rules(vec![
             mk_rule("s", METHODS_ALL, &["/*"], &["/api/*"]),
             mk_rule("a", METHODS_ALL, &["/api/*"], &[]),
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn prefix_exclude_deeper_than_include_vetoes() {
         // The walk fires the "/api/*" include terminal, then must keep
-        // walking to see the "/api/private/*" exclude (thesis NT65:
+        // walking to see the "/api/private/*" exclude (:
         // exclusion is a bit in the running mask, not an early return).
         let mut rules = forty_rules();
         rules.push(mk_rule(
@@ -767,7 +767,7 @@ mod tests {
     #[test]
     #[ignore = "crossover measurement; run with `cargo test -- --ignored`"]
     fn crossover_scan_vs_trie() {
-        // Affine crossover (NT58) measured directly: time the scan and
+        // Affine crossover measured directly: time the scan and
         // the automaton on identical rule sets and identical paths, and
         // print the crossing. The observed crossover justifies
         // TRIE_MIN_RULES. No timing assertions (hardware noise).
