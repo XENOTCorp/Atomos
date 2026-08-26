@@ -15,7 +15,7 @@ Two engines share one kernel:
 Atomos is built on [FDS](https://github.com/ascendnoosphere/FDS), the
 transport engine. See [BENCHMARKS.md](BENCHMARKS.md) for measured
 comparisons against nginx, h2o, Caddy, Seastar, axum, Hyper, and
-nghttpd, and [WIKI.md](WIKI.md) for features, architecture, and
+actix-web, and [WIKI.md](WIKI.md) for features, architecture, and
 implementation examples.
 
 ## Quick start
