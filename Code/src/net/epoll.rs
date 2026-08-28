@@ -1,5 +1,5 @@
 //! HTTP/1.1 run-to-completion engine, built on the FDS transport engine
-//! (`fds-core`): the epoll reactor is FDS's edge-triggered reactor with a
+//! (`fds`): the epoll reactor is FDS's edge-triggered reactor with a
 //! drain-to-EAGAIN busy-poll discipline, sockets are FDS's nonblocking
 //! TCP transport (options applied before bind for SO_REUSEPORT group
 //! admission), and per-connection state lives in FDS's preallocated
@@ -21,10 +21,10 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use fds_core::conn::{ConnTable, Connection, ConnectionId, ConnectionSlot, CONN_CAP};
-use fds_core::reactor::{EpollEvent, Interest, PollTimeout, Reactor};
-use fds_core::tcp::{TcpListener, TcpStream};
-use fds_core::util::now_ticks;
+use fds::conn::{ConnTable, Connection, ConnectionId, ConnectionSlot, CONN_CAP};
+use fds::reactor::{EpollEvent, Interest, PollTimeout, Reactor};
+use fds::tcp::{TcpListener, TcpStream};
+use fds::util::now_ticks;
 
 use crate::access_log;
 use crate::align::STATE_ON;
@@ -92,7 +92,7 @@ pub fn run(router: Arc<Router>, ctx: Arc<AtomCtx>) -> Result<(), ServeError> {
             format!("bind port {} is in refuse_ports", addr.port()).into(),
         ));
     }
-    let tcp_cfg = fds_core::config::TcpConfig {
+    let tcp_cfg = fds::config::TcpConfig {
         nodelay: router.cfg.tcp_nodelay,
         reuseport: router.cfg.so_reuseport,
         fastopen: if router.cfg.tcp_fastopen {

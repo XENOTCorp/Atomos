@@ -1,6 +1,6 @@
 //! Pin the current OS thread to a logical CPU. Linux. Failure is non-fatal.
 //!
-//! The syscall itself comes from the FDS engine (`fds_core::util::pin_to_core`);
+//! The syscall itself comes from the FDS engine (`fds::util::pin_to_core`);
 //! this module keeps the Atomos-side convention of `index % ncpu` and the
 //! non-fatal `Option` contract shared by both engines.
 
@@ -22,7 +22,7 @@ pub fn pin_to_cpu(index: usize) -> Option<usize> {
     {
         let n = ncpu();
         let cpu = index % n;
-        match fds_core::util::pin_to_core(cpu) {
+        match fds::util::pin_to_core(cpu) {
             Ok(()) => Some(cpu),
             Err(_) => None,
         }

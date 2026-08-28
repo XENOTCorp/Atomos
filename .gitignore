@@ -1,5 +1,8 @@
 /target
-.atomos/
+/Code/target
+/Code/.cargo/config.toml
+**/.atomos/
+.local/
 **/*.rs.bk
 *.swp
 .DS_Store

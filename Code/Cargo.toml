@@ -2,17 +2,16 @@
 name = "atomos"
 version = "0.1.0"
 edition = "2021"
-# fds-core (path dep) requires rustc 1.97.1 — the engine this crate builds on.
+# fds (path dep) requires rustc 1.97.1. That crate is the transport this kernel uses.
 rust-version = "1.97.1"
 license = "MIT"
-description = "Barebones HTTP kernel: disjoint JSON rules, modules, atoms, operator CLI."
-readme = "README.md"
+description = "HTTP kernel: disjoint JSON rules, modules, atoms, operator CLI."
+readme = "../README.md"
 keywords = ["http", "http2", "http3", "server"]
 categories = ["network-programming", "web-programming::http-server"]
 
 [lib]
 name = "atomos"
-path = "src/lib.rs"
 
 [[bin]]
 name = "atomos"
@@ -30,6 +29,10 @@ path = "src/bin/sup.rs"
 name = "atomos-proto"
 path = "src/bin/proto.rs"
 
+[[bin]]
+name = "atomos-keyd"
+path = "src/bin/keyd.rs"
+
 [[example]]
 name = "static_site"
 path = "examples/static_site.rs"
@@ -46,15 +49,21 @@ path = "examples/first_app.rs"
 name = "loadgen"
 path = "examples/loadgen.rs"
 
+[[example]]
+name = "login_server"
+path = "examples/login_server.rs"
+
+[[example]]
+name = "bench_h23"
+path = "examples/bench_h23.rs"
+
 [dependencies]
 arc-swap = "1"
 bytes = "1"
 dtoa = "1"
-# FDS transport engine (sibling repo): the epoll H1 engine's reactor,
-# TCP transport, connection table, and pinning come from here. Features
-# off: the H1 engine uses the epoll reactor only (io_uring/AF_XDP/SCTP
-# are the FDS engine's experimental paths, unused by atomos).
-fds-core = { path = "../FDS/crates/fds-core", default-features = false }
+# Vendored FDS transport library. Features off: the H1 engine uses the
+# epoll reactor only (io_uring, AF_XDP, and SCTP are unused by Atomos).
+fds = { path = "FDS/crates/fds", default-features = false }
 h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
@@ -83,10 +92,6 @@ default = ["h1"]
 h1 = []
 proto = []
 wasm = ["dep:wasmtime"]
-
-[[bin]]
-name = "atomos-keyd"
-path = "src/bin/keyd.rs"
 
 [dev-dependencies]
 tempfile = "3"
