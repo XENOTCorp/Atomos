@@ -1,7 +1,7 @@
 //! Operator CLI / JSON API. Separate process from the HTTP listener.
 //! File mutations go through atoms only. Criticality C2 (CRUD) / C1 (display).
 
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 
 use crate::atom::AtomCtx;
 use crate::config::Config;
-use crate::error::AtomError;
 
 /// `$HOME/atomos` → `target` (usually this ctl binary).
 pub fn install_link(home: &Path, target: &Path) -> std::io::Result<PathBuf> {
@@ -23,97 +22,22 @@ pub fn install_link(home: &Path, target: &Path) -> std::io::Result<PathBuf> {
     Ok(link)
 }
 
+mod cmd;
+mod json;
+mod keys;
+mod prompt;
+
+pub use cmd::{parse_json, parse_line, parse_words, Cmd};
+pub use json::{atom_err_msg, atom_error_json, io_error_json, run_json_lines};
+pub use keys::random_token;
+pub use prompt::{format_human, help_text, run_repl};
+use json::connect_error_json;
+use keys::keys_list;
+
 #[derive(Debug, Clone)]
 pub struct Env {
     pub cfg: Config,
     pub data_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cmd {
-    Help,
-    Status,
-    KeysList { reveal: bool },
-    KeysAdd { note: String },
-    KeysDel { index: usize, yes: bool },
-    JsonDump,
-    ConfigShow,
-    Restart { yes: bool },
-    Stop { yes: bool },
-    Start,
-    Refresh,
-    Backup,
-    DryTest,
-    Quit,
-}
-
-pub fn io_error_json(err: &std::io::Error, path: &Path) -> Value {
-    let path_s = path.display().to_string();
-    match err.kind() {
-        std::io::ErrorKind::PermissionDenied => json!({
-            "ok": false,
-            "error": "permission_denied",
-            "path": path_s,
-            "message": format!("permission denied opening {path_s} (mode 0600, same EUID only)")
-        }),
-        std::io::ErrorKind::NotFound if path_s.ends_with(".sock") => json!({
-            "ok": false,
-            "error": "server_unreachable",
-            "path": path_s,
-            "message": format!("control Unix socket {path_s} is missing (not a TCP port; HTTP bind is separate)")
-        }),
-        std::io::ErrorKind::NotFound => json!({
-            "ok": false,
-            "error": "not_found",
-            "path": path_s,
-            "message": format!("not found: {path_s}")
-        }),
-        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset => json!({
-            "ok": false,
-            "error": "server_unreachable",
-            "path": path_s,
-            "message": format!("nothing is listening on {path_s} (stale socket file?)")
-        }),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => json!({
-            "ok": false,
-            "error": "timeout",
-            "path": path_s,
-            "message": format!("timeout talking to {path_s}")
-        }),
-        _ => json!({
-            "ok": false,
-            "error": "io",
-            "path": path_s,
-            "message": format!("{path_s}: {err}")
-        }),
-    }
-}
-
-fn connect_error_json(err: &std::io::Error, path: &Path) -> Value {
-    let mut v = io_error_json(err, path);
-    if v["error"] == "not_found" {
-        v["error"] = json!("server_unreachable");
-        v["message"] = json!(format!(
-            "control Unix socket {} is missing (not a TCP port; HTTP bind is separate)",
-            path.display()
-        ));
-    }
-    v
-}
-
-pub fn atom_error_json(err: AtomError, path: &Path) -> Value {
-    match err {
-        AtomError::Io(e) => io_error_json(&e, path),
-        other => json!({"ok": false, "error": "atom", "message": other.to_string()}),
-    }
-}
-
-pub fn atom_err_msg(err: AtomError, path: &Path) -> String {
-    atom_error_json(err, path)
-        .get("message")
-        .and_then(|m| m.as_str())
-        .unwrap_or("error")
-        .to_string()
 }
 
 pub fn http_listening(bind: &str) -> bool {
@@ -152,158 +76,6 @@ pub fn uds_cmd(sock: &Path, cmd: &str) -> Result<Value, String> {
             .to_string()),
     }
 }
-
-pub fn help_text() -> String {
-    "ATOMOS operator ctl
-
-Usage:
-  atomos-ctl [--config PATH] [--data PATH] [--json] <command> [args]
-  atomos-ctl                          interactive prompt  >
-  atomos-ctl --json                   JSON lines on stdin → JSON lines on stdout
-
-Commands:
-  help                 this text
-  status | ping        control Unix socket + HTTP bind liveness
-  keys list            list /keys in the data file (masked unless --reveal)
-  keys add [note]      append a random token via json.crud
-  keys del <index>     delete key at index (needs --yes)
-  json dump            pretty-print the data file
-  config               bind, socket, rules_path, static_root
-  start | stop | restart | refresh | backup | dry-test
-  quit                 leave the prompt
-
-Flags:
-  --config PATH        ATOMOS_CONFIG or config.json
-  --data PATH          JSON file for keys CRUD (default data.json)
-  --socket PATH        override control Unix socket
-  --json               machine envelope (one JSON object per line)
-  --yes                confirm destructive commands
-  --reveal             show full tokens
-  -h, --help
-
-JSON line API (GUI / scripts):
-  {\"cmd\":\"status\"}
-  {\"cmd\":\"keys.list\",\"reveal\":false}
-  {\"cmd\":\"keys.add\",\"note\":\"lab\"}
-  {\"cmd\":\"keys.del\",\"index\":0,\"yes\":true}
-  {\"cmd\":\"json.dump\"}
-  {\"cmd\":\"refresh\"}
-  {\"cmd\":\"restart\",\"yes\":true}
-
-Control plane is the Unix socket ($XDG_RUNTIME_DIR/atomos.sock), not the HTTP bind.
-"
-    .to_string()
-}
-
-pub fn parse_line(line: &str) -> Result<Cmd, String> {
-    let t = line.trim();
-    if t.is_empty() {
-        return Err("empty".into());
-    }
-    if t.starts_with('{') {
-        let v: Value = serde_json::from_str(t).map_err(|e| e.to_string())?;
-        return parse_json(&v);
-    }
-    let words: Vec<&str> = t.split_whitespace().collect();
-    parse_words(&words)
-}
-
-pub fn parse_words<S: AsRef<str>>(words: &[S]) -> Result<Cmd, String> {
-    let mut yes = false;
-    let mut reveal = false;
-    let mut w: Vec<&str> = Vec::new();
-    for x in words {
-        match x.as_ref() {
-            "--yes" | "-y" => yes = true,
-            "--reveal" => reveal = true,
-            s => w.push(s),
-        }
-    }
-    if w.is_empty() {
-        return Err("empty".into());
-    }
-    match w[0] {
-        "help" | "-h" | "--help" => Ok(Cmd::Help),
-        "status" | "ping" => Ok(Cmd::Status),
-        "quit" | "exit" | "q" => Ok(Cmd::Quit),
-        "config" => Ok(Cmd::ConfigShow),
-        "json" => match w.get(1).copied().unwrap_or("dump") {
-            "dump" | "pretty" | "show" => Ok(Cmd::JsonDump),
-            "list" | "ls" => Ok(Cmd::KeysList { reveal }),
-            other => Err(format!("unknown json subcommand: {other}")),
-        },
-        "keys" => {
-            let sub = w.get(1).copied().unwrap_or("list");
-            match sub {
-                "list" | "ls" => Ok(Cmd::KeysList { reveal }),
-                "add" => Ok(Cmd::KeysAdd {
-                    note: w.get(2..).unwrap_or(&[]).join(" "),
-                }),
-                "del" | "rm" | "delete" => {
-                    let index = w
-                        .get(2)
-                        .ok_or_else(|| "keys del <index>".to_string())?
-                        .parse::<usize>()
-                        .map_err(|_| "keys del <index> must be a number".to_string())?;
-                    Ok(Cmd::KeysDel { index, yes })
-                }
-                other => Err(format!("unknown keys subcommand: {other}")),
-            }
-        }
-        "restart" => Ok(Cmd::Restart { yes }),
-        "stop" => Ok(Cmd::Stop { yes }),
-        "start" => Ok(Cmd::Start),
-        "refresh" | "refresh-endpoints" => Ok(Cmd::Refresh),
-        "backup" => Ok(Cmd::Backup),
-        "dry-test" | "dry_test" | "dry-test-rules" => Ok(Cmd::DryTest),
-        other => Err(format!("unknown command: {other} (try help)")),
-    }
-}
-
-pub fn parse_json(v: &Value) -> Result<Cmd, String> {
-    let cmd = v
-        .get("cmd")
-        .and_then(|c| c.as_str())
-        .ok_or_else(|| "missing cmd".to_string())?;
-    let yes = v.get("yes").and_then(|x| x.as_bool()).unwrap_or(false);
-    let reveal = v.get("reveal").and_then(|x| x.as_bool()).unwrap_or(false);
-    let note = v
-        .get("note")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let index = v.get("index").and_then(|x| x.as_u64()).map(|n| n as usize);
-    match cmd {
-        "help" => Ok(Cmd::Help),
-        "status" | "ping" => Ok(Cmd::Status),
-        "quit" | "exit" => Ok(Cmd::Quit),
-        "config" => Ok(Cmd::ConfigShow),
-        "json.dump" | "json_dump" | "json" => Ok(Cmd::JsonDump),
-        "keys.list" | "keys_list" => Ok(Cmd::KeysList { reveal }),
-        "keys.add" | "keys_add" => Ok(Cmd::KeysAdd { note }),
-        "keys.del" | "keys_del" => Ok(Cmd::KeysDel {
-            index: index.ok_or_else(|| "keys.del needs index".to_string())?,
-            yes,
-        }),
-        "keys" => match v.get("op").and_then(|o| o.as_str()).unwrap_or("list") {
-            "list" => Ok(Cmd::KeysList { reveal }),
-            "add" => Ok(Cmd::KeysAdd { note }),
-            "del" => Ok(Cmd::KeysDel {
-                index: index.ok_or_else(|| "keys del needs index".to_string())?,
-                yes,
-            }),
-            other => Err(format!("unknown keys op: {other}")),
-        },
-        "restart" => Ok(Cmd::Restart { yes }),
-        "stop" => Ok(Cmd::Stop { yes }),
-        "start" => Ok(Cmd::Start),
-        "refresh" | "refresh-endpoints" => Ok(Cmd::Refresh),
-        "backup" => Ok(Cmd::Backup),
-        "dry-test" | "dry_test" | "dry-test-rules" => Ok(Cmd::DryTest),
-        other => Err(format!("unknown cmd: {other}")),
-    }
-}
-
 fn confirm_needed(what: &str) -> Value {
     json!({
         "ok": false,
@@ -332,27 +104,6 @@ fn now_s() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-
-pub fn random_token() -> String {
-    let mut b = [0u8; 12];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut b);
-    }
-    let mut out = String::with_capacity(24);
-    for x in b {
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{x:02x}"));
-    }
-    out
-}
-
-fn mask(s: &str) -> String {
-    if s.len() <= 4 {
-        "****".into()
-    } else {
-        format!("{}…{}", &s[..2], &s[s.len() - 2..])
-    }
-}
-
 pub fn exec_cmd(env: &Env, cmd: Cmd) -> Value {
     let cfg = &env.cfg;
     match cmd {
@@ -476,132 +227,6 @@ fn uds_wrap(cfg: &Config, cmd: &str) -> Value {
         Err(e) => enrich_http(e, cfg),
     }
 }
-
-fn keys_list(path: &Path, reveal: bool) -> Value {
-    if !path.exists() {
-        return json!({"ok": true, "keys": []});
-    }
-    match std::fs::read(path) {
-        Err(e) => io_error_json(&e, path),
-        Ok(raw) => match serde_json::from_slice::<Value>(&raw) {
-            Err(e) => json!({"ok": false, "error": "json", "message": e.to_string()}),
-            Ok(doc) => {
-                let keys = match doc.get("keys").and_then(|k| k.as_array()) {
-                    Some(arr) => arr
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            if let Some(t) = v.get("token").and_then(|x| x.as_str()) {
-                                let shown = if reveal {
-                                    t.to_string()
-                                } else {
-                                    mask(t)
-                                };
-                                json!({
-                                    "index": i,
-                                    "token": shown,
-                                    "note": v.get("note").and_then(|x| x.as_str()).unwrap_or(""),
-                                    "created_s": v.get("created_s").and_then(|x| x.as_u64()).unwrap_or(0)
-                                })
-                            } else {
-                                json!({"index": i, "value": v})
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                    None => Vec::new(),
-                };
-                json!({"ok": true, "keys": keys})
-            }
-        },
-    }
-}
-
-pub fn format_human(v: &Value) -> String {
-    if let Some(h) = v.get("help").and_then(|x| x.as_str()) {
-        return h.to_string();
-    }
-    if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
-        let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("error");
-        let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("");
-        let mut s = if msg.is_empty() {
-            err.to_string()
-        } else {
-            format!("{err}: {msg}")
-        };
-        if let Some(h) = v.get("hint").and_then(|x| x.as_str()) {
-            s.push('\n');
-            s.push_str(h);
-        }
-        return s;
-    }
-    serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into())
-}
-
-pub fn run_repl<R: BufRead, W: Write>(env: &Env, mut input: R, mut out: W) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "ATOMOS ctl  socket={}  bind={}  data={}",
-        env.cfg.control_socket.display(),
-        env.cfg.bind,
-        env.data_path.display()
-    )?;
-    writeln!(out, "type help  ·  JSON objects also accepted")?;
-    loop {
-        write!(out, "> ")?;
-        out.flush()?;
-        let mut line = String::new();
-        if input.read_line(&mut line)? == 0 {
-            writeln!(out)?;
-            break;
-        }
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        match parse_line(t) {
-            Ok(Cmd::Quit) => break,
-            Ok(cmd) => {
-                let v = exec_cmd(env, cmd);
-                writeln!(out, "{}", format_human(&v).trim_end())?;
-            }
-            Err(e) => writeln!(out, "usage: {e}")?,
-        }
-    }
-    Ok(())
-}
-
-pub fn run_json_lines<R: BufRead, W: Write>(
-    env: &Env,
-    input: R,
-    mut out: W,
-) -> std::io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let parsed = if t.starts_with('{') {
-            match serde_json::from_str::<Value>(t) {
-                Ok(v) => parse_json(&v),
-                Err(e) => Err(e.to_string()),
-            }
-        } else {
-            parse_line(t)
-        };
-        let v = match parsed {
-            Ok(Cmd::Quit) => {
-                writeln!(out, "{}", json!({"ok": true, "quit": true}))?;
-                break;
-            }
-            Ok(c) => exec_cmd(env, c),
-            Err(e) => json!({"ok": false, "error": "usage", "message": e}),
-        };
-        writeln!(out, "{v}")?;
-    }
-    Ok(())
-}
-
 pub fn run_cli(env: &Env, words: &[String], json: bool, stdin_tty: bool) -> i32 {
     if words.is_empty() {
         if json || !stdin_tty {
