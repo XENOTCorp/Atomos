@@ -7,14 +7,15 @@
 //! tokens (a closed fd's number can never alias a live connection).
 //! No tokio tasks, no spawn-per-conn. H2/H3 are not handled here.
 //!
-//! The receive loop allocates nothing after warm-up: the request buffer
-//! is consumed through a read cursor (compacted once per 64 KiB instead
-//! of a `drain` memmove per request) and the response encoder writes
-//! into a reused thread-local scratch instead of a fresh `Vec` per
-//! request.
+//! The receive loop allocates nothing after warm-up: HTTP `Conn` state
+//! is a slot array indexed by the packed [`ConnectionId`] (not a
+//! `HashMap`), the request buffer is pre-sized at accept to
+//! `max_header + max_body` and never grown, consumed bytes are compacted
+//! once per 64 KiB instead of a `drain` memmove per request, and the
+//! response encoder writes into a reused per-worker scratch. Outgoing
+//! bytes copy into a fixed `out` buffer or `write_all`; the hot path
+//! does not realloc (ALLOC-01).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -50,12 +51,41 @@ const TOKEN_LISTENER: u64 = u64::MAX;
 /// been read (one memmove per 64 KiB instead of per request).
 const COMPACT_THRESHOLD: usize = 64 * 1024;
 
-// Reused response-encoding scratch (per worker thread; zero allocation
-// per request after warm-up).
-thread_local! {
-    static ENC: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(2048));
+/// Encoded-header scratch and cache-hit copy cap. Sized on the worker
+/// (control path). The hot path never grows these.
+pub const OUT_CAP: usize = 2048;
+
+/// Slot index for a live HTTP connection token. `None` for the listener
+/// or an out-of-range id.
+pub const fn http_slot(token: u64) -> Option<usize> {
+    if token == TOKEN_LISTENER {
+        return None;
+    }
+    let slot = ConnectionId::from_u64(token).slot() as usize;
+    if slot < CONN_CAP {
+        Some(slot)
+    } else {
+        None
+    }
 }
 
+pub const fn buf_capacity_for(max_header: usize, max_body: usize) -> usize {
+    max_header.saturating_add(max_body)
+}
+
+/// Append `src` only when it fits in existing capacity. Never realloc.
+pub fn append_in_cap(buf: &mut Vec<u8>, src: &[u8]) -> bool {
+    if src.len() > buf.capacity().saturating_sub(buf.len()) {
+        return false;
+    }
+    buf.extend_from_slice(src);
+    true
+}
+
+/// Copy `src` onto `out` only when it fits in existing capacity.
+pub fn copy_into_out(out: &mut Vec<u8>, src: &[u8]) -> bool {
+    append_in_cap(out, src)
+}
 
 pub fn run(router: Arc<Router>, ctx: Arc<AtomCtx>) -> Result<(), ServeError> {
     let mut addr: SocketAddr = router
@@ -124,15 +154,15 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
     reactor.register(listener.as_raw_fd(), TOKEN_LISTENER, Interest::Readable)?;
 
     // Preallocated per-worker connection table (hot/cold halves; packed
-    // slot tokens). The HTTP Conn state (stream, buf, out) lives in a
-    // HashMap keyed by the token, so a closed fd's number can never
-    // alias a live connection.
+    // slot tokens). HTTP Conn state is a slot array indexed by the
+    // token's low half. A closed fd's number never aliases a live slot.
     let conns: ConnTable<CONN_CAP> = ConnTable::new();
     let now = now_ticks();
     for i in 0..CONN_CAP {
         conns.initialize(i, Connection::new("0.0.0.0:0".parse().unwrap(), now));
     }
-    let mut streams: HashMap<u64, Conn<'_>> = HashMap::with_capacity(CONN_CAP);
+    let mut streams: Vec<Option<Conn<'_>>> = (0..CONN_CAP).map(|_| None).collect();
+    let mut enc = Vec::with_capacity(OUT_CAP);
 
     // 200 ms poll timeout doubles as the stop-poll cadence (shutdown
     // latency <= 200 ms), matching the pre-FDS engine.
@@ -157,16 +187,19 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
         for ev in evbuf.iter().take(m) {
             let token = ev.token;
             if token == TOKEN_LISTENER {
-                accept_loop(&listener, &mut reactor, &conns, &mut streams);
+                accept_loop(&listener, &mut reactor, &conns, &mut streams, &router);
                 continue;
             }
+            let Some(idx) = http_slot(token) else {
+                continue;
+            };
             let mut drop_fd = ev.error || ev.hang_up;
-            if let Some(c) = streams.get_mut(&token) {
+            if let Some(c) = streams[idx].as_mut() {
                 // A pending sendfile (or buffered out bytes) means the
                 // response is mid-write: do not read/parse the next
                 // pipelined request until it is fully sent.
                 if !drop_fd && ev.readable && c.out.is_empty() && c.pending_sf.is_none() {
-                    match read_and_serve(c, &router) {
+                    match read_and_serve(c, &router, &mut enc) {
                         Ok(false) => drop_fd = true,
                         Ok(true) => {}
                         Err(_) => drop_fd = true,
@@ -179,16 +212,17 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
                     } else if c.out.is_empty() && c.pending_sf.is_none() {
                         let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::Readable);
                     } else {
-                        let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::ReadableWritable);
+                        let _ =
+                            reactor.modify(c.stream.as_raw_fd(), token, Interest::ReadableWritable);
                     }
                 } else if busy {
                     let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::ReadableWritable);
                 }
             }
             if drop_fd {
-                // Removing the Conn drops the slot guard, which releases
+                // Taking the Conn drops the slot guard, which releases
                 // the table slot exactly once.
-                if let Some(c) = streams.remove(&token) {
+                if let Some(c) = streams[idx].take() {
                     let _ = reactor.unregister(c.stream.as_raw_fd());
                 }
             }
@@ -201,8 +235,10 @@ fn accept_loop<'a>(
     listener: &TcpListener,
     reactor: &mut Reactor,
     conns: &'a ConnTable<CONN_CAP>,
-    streams: &mut HashMap<u64, Conn<'a>>,
+    streams: &mut [Option<Conn<'a>>],
+    router: &Router,
 ) {
+    let buf_cap = buf_capacity_for(router.cfg.max_header_bytes, router.cfg.max_body_bytes);
     loop {
         match listener.accept() {
             Ok(Some((stream, peer))) => {
@@ -220,19 +256,16 @@ fn accept_loop<'a>(
                 {
                     continue; // slot guard drops -> slot released
                 }
-                streams.insert(
-                    token,
-                    Conn {
-                        stream,
-                        peer,
-                        buf: Vec::with_capacity(4096),
-                        pos: 0,
-                        out: Vec::with_capacity(2048),
-                        out_off: 0,
-                        pending_sf: None,
-                        slot,
-                    },
-                );
+                streams[idx] = Some(Conn {
+                    stream,
+                    peer,
+                    buf: Vec::with_capacity(buf_cap),
+                    pos: 0,
+                    out: Vec::with_capacity(OUT_CAP),
+                    out_off: 0,
+                    pending_sf: None,
+                    slot,
+                });
             }
             Ok(None) => break,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -241,13 +274,36 @@ fn accept_loop<'a>(
     }
 }
 
-fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
+fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
+    if copy_into_out(&mut c.out, bytes) {
+        return Ok(());
+    }
+    // Does not fit. Flush any already-queued bytes first so a
+    // write_all of `bytes` cannot overtake them (pipelined responses).
+    if !c.out.is_empty() {
+        flush_out(c)?;
+        if copy_into_out(&mut c.out, bytes) {
+            return Ok(());
+        }
+        if !c.out.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "epoll: out cap (ALLOC-01)",
+            ));
+        }
+    }
+    c.stream.write_all(bytes)
+}
+
+fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::Result<bool> {
     let mut tmp = [0u8; 4096];
     loop {
         match c.stream.read(&mut tmp) {
             Ok(0) => return Ok(false),
             Ok(n) => {
-                c.buf.extend_from_slice(&tmp[..n]);
+                if !append_in_cap(&mut c.buf, &tmp[..n]) {
+                    return Ok(false);
+                }
                 // Hot state: sequence + activity on every step (the
                 // FDS hot/cold split in action).
                 let hot = &mut c.slot.conn_mut().hot;
@@ -287,16 +343,14 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
                         let ka = p.keepalive;
                         if router.cfg.access_log {
                             // Prefer Out body len when still cached; else skip bytes.
-                            let (status, blen) =
-                                match router.cache.get(p.method, p.path, p.query) {
-                                    Some(o) => (o.status.as_u16(), o.body.len()),
-                                    None => (200, 0),
-                                };
+                            let (status, blen) = match router.cache.get(p.method, p.path, p.query) {
+                                Some(o) => (o.status.as_u16(), o.body.len()),
+                                None => (200, 0),
+                            };
                             access_log::emit(p.method, p.path, status, blen);
                         }
                         c.pos = need;
-                        c.out.extend_from_slice(wire.as_ref());
-                        c.out_off = 0;
+                        queue_bytes(c, wire.as_ref())?;
                         if !ka {
                             let _ = flush_out(c);
                             return Ok(false);
@@ -329,16 +383,16 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
                     flags: FlagSet::empty(),
                 };
                 let ka = p.keepalive;
-                let log = router.cfg.access_log.then(|| (p.method, p.path.to_string()));
+                let log = router
+                    .cfg
+                    .access_log
+                    .then(|| (p.method, p.path.to_string()));
                 let out = router.dispatch(req);
-                // Encode into the reused thread-local scratch: no heap
-                // allocation per request after warm-up.
-                ENC.with(|enc| {
-                    let mut enc = enc.borrow_mut();
-                    enc.clear();
-                    encode_response(&out, &mut enc);
-                    c.out.extend_from_slice(&enc);
-                });
+                // Encode into the reused per-worker scratch: no heap
+                // allocation per request after warm-up (ALLOC-01).
+                enc.clear();
+                encode_response(&out, enc);
+                queue_bytes(c, enc)?;
                 if let OutBody::File(f) = &out.body {
                     // Headers are in `out` (Content-Length = file size);
                     // the body goes kernel-side via sendfile.
@@ -361,7 +415,6 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +430,65 @@ mod tests {
         // listener token is u64::MAX. No overlap is possible.
         assert_ne!(ConnectionId::new(0, u32::MAX).as_u64(), TOKEN_LISTENER);
         assert_eq!(ConnectionId::new(0, 7).as_u64() & !0xFFFF_FFFF, 0);
+    }
+
+    #[test]
+    fn http_slot_is_connection_id_low_half() {
+        let tok = ConnectionId::new(0, 7).as_u64();
+        assert_eq!(http_slot(tok), Some(7));
+        assert_eq!(http_slot(TOKEN_LISTENER), None);
+        assert_eq!(
+            http_slot(ConnectionId::new(0, CONN_CAP as u32).as_u64()),
+            None
+        );
+    }
+
+    #[test]
+    fn buf_capacity_covers_header_and_body() {
+        assert_eq!(buf_capacity_for(16, 32), 48);
+    }
+
+    #[test]
+    fn append_in_cap_does_not_grow() {
+        let mut b = Vec::with_capacity(16);
+        assert!(append_in_cap(&mut b, b"hello"));
+        assert_eq!(b.capacity(), 16);
+        assert_eq!(&b, b"hello");
+        assert!(!append_in_cap(&mut b, &[0u8; 32]));
+        assert_eq!(b.capacity(), 16);
+        assert_eq!(&b, b"hello");
+    }
+
+    #[test]
+    fn copy_into_out_does_not_grow() {
+        let mut out = Vec::with_capacity(8);
+        assert!(copy_into_out(&mut out, b"abcd"));
+        assert_eq!(out.capacity(), 8);
+        assert!(!copy_into_out(&mut out, b"12345"));
+        assert_eq!(out.capacity(), 8);
+        assert_eq!(&out, b"abcd");
+    }
+
+    #[test]
+    fn encode_scratch_fits_small_json_without_grow() {
+        use crate::flags::FlagSet;
+        use crate::io::{CacheDirective, Out, OutBody};
+        use crate::status::Status;
+        use bytes::Bytes;
+
+        let out = Out {
+            status: Status::OK,
+            reason: None,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: OutBody::Json(Bytes::from_static(br#"{"ok":true}"#)),
+            cache: CacheDirective::No,
+            flags: FlagSet::empty(),
+        };
+        let mut enc = Vec::with_capacity(OUT_CAP);
+        let cap = enc.capacity();
+        encode_response(&out, &mut enc);
+        assert_eq!(enc.capacity(), cap);
+        assert!(!enc.is_empty());
+        assert!(enc.len() <= OUT_CAP);
     }
 }
