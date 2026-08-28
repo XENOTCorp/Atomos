@@ -17,13 +17,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use fds::conn::{ConnTable, Connection, ConnectionId, ConnectionSlot, CONN_CAP};
+use fds::conn::{ConnTable, Connection, ConnectionId, CONN_CAP};
 use fds::reactor::{EpollEvent, Interest, PollTimeout, Reactor};
-use fds::tcp::{TcpListener, TcpStream};
+use fds::tcp::TcpListener;
 use fds::util::now_ticks;
 
 use crate::access_log;
@@ -36,6 +35,11 @@ use crate::io::{Body, HeaderView, In, OutBody};
 use crate::parse::{looks_like_json, parse_request, scan_json, ParseStatus};
 use crate::pin_cpu;
 use crate::route::Router;
+
+mod conn;
+mod write;
+use conn::{Conn, PendingSf};
+use write::flush_out;
 
 /// Reserved token for the listener; connection tokens are packed
 /// [`ConnectionId`]s (slot-based, so they never collide with the
@@ -52,35 +56,7 @@ thread_local! {
     static ENC: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(2048));
 }
 
-struct Conn<'a> {
-    stream: TcpStream,
-    peer: SocketAddr,
-    buf: Vec<u8>,
-    /// Bytes of `buf` already consumed by completed requests (read
-    /// cursor; compacted out past [`COMPACT_THRESHOLD`]).
-    pos: usize,
-    out: Vec<u8>,
-    out_off: usize,
-    /// File body being sent with `sendfile` after the header bytes in
-    /// `out` are flushed. Non-None means the response is not fully
-    /// written: the worker keeps writable interest and skips reads
-    /// until it completes (request/response order must be preserved).
-    pending_sf: Option<PendingSf>,
-    /// Held for the connection's lifetime: dropping it releases the
-    /// table slot exactly once (never call `release_slot` while a guard
-    /// is alive — that would double-release the free-list ring).
-    slot: ConnectionSlot<'a, CONN_CAP>,
-}
 
-/// Remaining range of an open file to send kernel-side.
-struct PendingSf {
-    file: Arc<std::fs::File>,
-    /// `off_t` so it can be passed to `sendfile` without a cast.
-    offset: libc::off_t,
-    len: u64,
-}
-
-/// Blocking. One pinned OS thread per worker; no tokio on the datapath.
 pub fn run(router: Arc<Router>, ctx: Arc<AtomCtx>) -> Result<(), ServeError> {
     let mut addr: SocketAddr = router
         .cfg
@@ -385,61 +361,6 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router) -> io::Result<bool> {
     }
 }
 
-fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
-    while c.out_off < c.out.len() {
-        match c.stream.write_all(&c.out[c.out_off..]) {
-            Ok(()) => c.out_off = c.out.len(),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(e) => return Err(e),
-        }
-    }
-    c.out.clear();
-    c.out_off = 0;
-    // Drain the file body kernel-side. Take/put so the borrow checker
-    // does not hold `pending_sf` while `stream` is borrowed.
-    loop {
-        let mut sf = match c.pending_sf.take() {
-            Some(s) => s,
-            None => break,
-        };
-        // SAFETY: both fds are valid and owned by this connection; the
-        // offset/count stay within the file range the fd was opened
-        // for (StaticMod sets offset=0, len=file size).
-        let n = unsafe {
-            libc::sendfile(
-                c.stream.as_raw_fd(),
-                sf.file.as_raw_fd(),
-                &mut sf.offset as *mut libc::off_t,
-                sf.len as usize,
-            )
-        };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::WouldBlock {
-                c.pending_sf = Some(sf);
-                return Ok(());
-            }
-            return Err(e);
-        }
-        let n = n as u64;
-        if n == 0 {
-            // EOF before the range was sent: the file shrank underneath
-            // us (cache is stale). Bail out rather than hang.
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "sendfile: file shorter than cached range",
-            ));
-        }
-        if n >= sf.len {
-            // Range fully sent.
-            continue;
-        }
-        sf.offset += n as libc::off_t;
-        sf.len -= n;
-        c.pending_sf = Some(sf);
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
