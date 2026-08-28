@@ -460,6 +460,58 @@ Do not add unwrap on the request path.
 5. Clippy clean. Link check. Character check.
 6. Delete `docs/superpowers/` from the public tree (including this spec). History keeps it.
 
+## 16. Hardware layout (CPU, L1, L3, RAM)
+
+Added after approval: check every hot path for cache-line isolation, heap, and RAM caps. Do not change HTTP results.
+
+Target: x86_64. Cache line is 64 bytes.
+
+### 16.1 Shared atomics
+
+Workers on different cores must not false-share.
+
+| Site | Today | Required |
+|---|---|---|
+| `LineAtomicU8` / `LineAtomicU64` | 64-byte line | Keep. Tests already lock size and align. |
+| `ResponseCache.epoch` | `Arc<AtomicU64>` | `Arc<LineAtomicU64>` |
+| `StaticMod.hits` | `AtomicU64` | `LineAtomicU64` |
+| H2 counting IO `rx` / `tx` | `Arc<AtomicU64>` | `Arc<LineAtomicU64>` |
+| `AtomCtx.signal` / `stop` | `LineAtomicU8` | Keep |
+| `Metrics` counters | `LineAtomicU64` | Keep |
+
+Do not add software prefetch.
+
+### 16.2 Heap on the H1 path
+
+| Site | Today | Required |
+|---|---|---|
+| `Sched::ip_key` | `octets().to_vec()` each admit | Stack `[u8; 4]` or `[u8; 16]`. Same hash. |
+| Epoll `streams` HashMap | default capacity | `with_capacity(CONN_CAP)` |
+| `Conn.out` | `Vec::new()` | `Vec::with_capacity(2048)` |
+| `FdCache` map | default capacity | `with_capacity(FD_CACHE_MAX)` |
+
+Do not allocate in `ip_key`. That function runs on every admitted request.
+
+### 16.3 RAM and L3
+
+`scripts/atomos-host.sh` already sets `cache_bytes` to L3 size. Keep that.
+
+Default `cache_bytes` without a host file is 256 MiB. Change it to 16 MiB so a naive start does not reserve L3-plus RAM. Host overlay still raises it to L3.
+
+Default `cache_entries` stays 4096.
+
+Do not change `memory_cap_bytes` defaults in tests. Example configs stay at 64 MiB.
+
+### 16.4 Tests
+
+Add unit tests that fail before the layout fix, then pass:
+
+- `ResponseCache` epoch lives in a 64-byte line type.
+- `ip_key` of `127.0.0.1:1` is stable and matches the current FNV-1a over the four octets (write the expected u32 from a one-off computation in the failing test).
+- `StaticMod.hits` is 64-byte aligned.
+
+Run `cargo test --lib align:: cache:: sched::` after the layout change.
+
 ## 15. Success
 
 The work is done when all of the following hold:
@@ -473,3 +525,4 @@ The work is done when all of the following hold:
 7. Getting Started and the wiki exist and use locked terms.
 8. FDS is a vendored copy of two crates, not a submodule.
 9. No GitHub remote was required.
+10. Shared hot atomics are line-padded. `ip_key` does not allocate. Default response cache is 16 MiB unless the host overlay sets L3.
