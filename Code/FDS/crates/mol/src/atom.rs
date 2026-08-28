@@ -14,7 +14,7 @@ pub trait Atom {
 /// A pure atom: `apply` is a total function with no state (PureMol).
 ///
 /// Implement this directly on your (typically zero-sized) atom type, or
-/// wrap a closure with [`PureFn`] and call it — `PureFn` is a pure
+/// wrap a closure with [`PureFn`] and call it: `PureFn` is a pure
 /// function carrier with no hidden state.
 pub trait PureAtom: Atom {
     fn apply(&self, input: Self::Input) -> Self::Output;
@@ -30,7 +30,7 @@ pub trait EffectfulAtom<Ctx>: Atom {
 /// A pure-function carrier: wrap any closure, call it with
 /// [`PureFn::call`]. Zero-sized in the common case (when the closure
 /// captures nothing), so it composes with no runtime cost. Note that
-/// `PureFn` itself does not implement [`Atom`] — implement [`Atom`] +
+/// `PureFn` itself does not implement [`Atom`]: implement [`Atom`] +
 /// [`PureAtom`] on your own atom types, or use [`crate::molecule::PureFn`]
 /// as a [`crate::molecule::Molecule`].
 pub struct PureFn<F>(pub F);

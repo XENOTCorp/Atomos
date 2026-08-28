@@ -7,7 +7,7 @@ pub const fn cache_line_size() -> usize {
 }
 
 /// A value aligned to a cache line (64 bytes), so it never shares a line
-/// with another `CachePadded` in an array — the false-sharing antidote.
+/// with another `CachePadded` in an array: the false-sharing antidote.
 #[repr(align(64))]
 pub struct CachePadded<T> {
     value: T,

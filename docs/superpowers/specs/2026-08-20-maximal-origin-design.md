@@ -98,7 +98,7 @@ Config may select one `EngineKind` at process start. Linking both engines into o
 
 ---
 
-## 4. Rules, cache, plugins — unique morphisms
+## 4. Rules, cache, plugins: unique morphisms
 
 ### 4.1 Rules = coproduct of disjoint guards
 
@@ -157,7 +157,7 @@ gain  = Δ / T_sys
 
 As `p_hit → 1`, `gain → 0`. The common case never enters a plugin. Uncached POST (notes) is in-process Rust today; `.so` would save call overhead ≪ `T_sys` and cost ambient authority.
 
-**H-07 forbids** putting `.so` on the fast path to “make the gain large.” That would be specializing by leaking ambient effects — the Wrong Example in H-07.
+**H-07 forbids** putting `.so` on the fast path to “make the gain large.” That would be specializing by leaking ambient effects: the Wrong Example in H-07.
 
 **Verdict (unique):** refuse `kind: native` and Lua/mruby. Link wasmtime **off** the cache-hit path, with fuel and epoch interrupt, when untrusted hot-swap is required.
 
@@ -246,7 +246,7 @@ Proof sketch column: the policy or universal property that makes the choice uniq
 | HTTP/2 as the **fast** path on this box | H-04: H1 ~143k > h2 ~39k > h3 ~5.3k. Fast path is H1. Proto still **inhabits** H2/H3 correctness. |
 | H3 at C quicly class on Broadwell | Silicon + C TCB; we inhabit quinn/rustls in proto |
 | Lua / mruby / nginx `load_module` `.so` | Ambient Cap; gain theorem |
-| Pingora upstream pool, retry, ketama, gRPC proxy | `Origin(X)` fails — different category (consumer/proxy) |
+| Pingora upstream pool, retry, ketama, gRPC proxy | `Origin(X)` fails: different category (consumer/proxy) |
 | Planet 40M rps anycast | Hardware + anycast; n/a |
 | picohttpparser **C** as TCB | L-02; optional Rust SIMD is §7.2 |
 
@@ -377,7 +377,7 @@ accept → parse_1 → hit? ──yes──→ write(wire) → [Log]
                  └──no──→ pre → match(R) → handle → post → put cache → encode → write → [Log]
 ```
 
-`handle` is pure. `Log` is the effect combinator with footprint `{log_fd}`. `par` is forbidden with overlapping footprints (operational effect algebra). Metrics scrape is a separate `handle` on a disjoint rule, or an atom on ctl — never mixed into the hit path.
+`handle` is pure. `Log` is the effect combinator with footprint `{log_fd}`. `par` is forbidden with overlapping footprints (operational effect algebra). Metrics scrape is a separate `handle` on a disjoint rule, or an atom on ctl: never mixed into the hit path.
 
 ---
 

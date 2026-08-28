@@ -22,12 +22,12 @@ CARGO_TARGET_DIR=$HOME/.cache/atomos-target ; unset RUSTFLAGS
 
 ## Tests
 Keep `native_so_is_refused`.
-`#[cfg(not(feature = "wasm"))] wasm_kind_without_feature_errors` — load_dir wasm json → Config error containing "host" or "wasm".
+`#[cfg(not(feature = "wasm"))] wasm_kind_without_feature_errors`: load_dir wasm json → Config error containing "host" or "wasm".
 `#[cfg(feature = "wasm")]` if you can ship a tiny component fixture, fuel test; if WIT component compile is too heavy, unit-test a `fuel_to_capacity` mapping with a mock and document BLOCKED fixture.
 
 Never call wasm from cache get. Do not change route.rs dispatch order.
 
-If wasmtime 24 fails to compile on this rustc, try 22 or 25; do not bump rust-version above 1.80 unless required; if required, set rust-version in a comment in the report only — do not edit Cargo.toml rust-version (orchestrator will).
+If wasmtime 24 fails to compile on this rustc, try 22 or 25; do not bump rust-version above 1.80 unless required; if required, set rust-version in a comment in the report only: do not edit Cargo.toml rust-version (orchestrator will).
 
 Report: `/home/xenot/Projects/Atomos/docs/superpowers/sdd/reports/wasm.md`
 No subagents. No git commit.

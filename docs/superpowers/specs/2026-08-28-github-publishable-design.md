@@ -70,7 +70,7 @@ Apply ASD-STE100 to README, `Docs/`, crate docs (`//!`), and sentence comments.
 9. Use `must` for a requirement. Use `do not` for a prohibition.
 10. Use present tense for facts.
 
-HTML example pages must not use `content:"— "` or an em dash in visible text.
+HTML example pages must not use `content:"- "` or an em dash in visible text.
 
 ## 5. Repository layout
 

@@ -1,6 +1,6 @@
 //! Allocation-counting global allocator, test-only (the
 //! zero-allocation datapath is a *typed* claim, and a counting
-//! allocator machine-checks it — the hot loop either allocates or it
+//! allocator machine-checks it: the hot loop either allocates or it
 //! does not, and this module observes which).
 //!
 //! The counter is per-thread (`thread_local!`), so a test runs its

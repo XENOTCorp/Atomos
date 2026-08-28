@@ -14,7 +14,7 @@
 unset RUSTFLAGS
 CARGO_TARGET_DIR=$HOME/.cache/atomos-target-jail cargo test --lib jail::
 ```
-**Result:** PASS — 3 passed (seccomp allowlist + filter bytes; landlock_restrict on tempdir via fork; prepare_socket_dir).
+**Result:** PASS: 3 passed (seccomp allowlist + filter bytes; landlock_restrict on tempdir via fork; prepare_socket_dir).
 
 ## Concerns
 - Seccomp install is unproven under `cargo test` with `seccomp: true` (would SIGSYS on missing syscalls); default stays false; filter reviewed via `seccomp_filter_bytes` / allowlist unit tests only.

@@ -20,7 +20,7 @@ pub(crate) struct Conn<'a> {
     pub(crate) pending_sf: Option<PendingSf>,
     /// Held for the connection's lifetime: dropping it releases the
     /// table slot exactly once (never call `release_slot` while a guard
-    /// is alive — that would double-release the free-list ring).
+    /// is alive: that would double-release the free-list ring).
     pub(crate) slot: ConnectionSlot<'a, CONN_CAP>,
 }
 

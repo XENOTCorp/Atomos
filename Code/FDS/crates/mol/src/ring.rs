@@ -29,7 +29,7 @@ pub struct SpscRing<T, const CAP: usize> {
     tail: AtomicUsize, // next slot to read (consumer-owned)
 }
 
-// SAFETY: see struct docs — the slot discipline makes cross-thread access
+// SAFETY: see struct docs: the slot discipline makes cross-thread access
 // sound for `T: Send`.
 unsafe impl<T: Send, const CAP: usize> Sync for SpscRing<T, CAP> {}
 
@@ -392,7 +392,7 @@ mod tests {
         let ring = Arc::new(MpmcRing::<u32, 1024>::new());
         // Shared count of items still to be consumed: consumers exit when
         // it reaches zero (a per-consumer `got == TOTAL` target can never
-        // be met once the items are split between consumers — livelock).
+        // be met once the items are split between consumers: livelock).
         let remaining = Arc::new(AtomicUsize::new(TOTAL));
         let mut producers = Vec::new();
         for p in 0..P {

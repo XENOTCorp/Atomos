@@ -1,12 +1,12 @@
 //! Parser atoms (standard \[A\], \[SIMD\], \[SEC\] left factoring,
 //! Fast-path specialization): the protocol header parsers are PURE
-//! molecules — total functions from validated `&[u8]` inputs to parsed
-//! headers — with every length checked before any indexing. The protocol
+//! molecules: total functions from validated `&[u8]` inputs to parsed
+//! headers: with every length checked before any indexing. The protocol
 //! parsers are the paper's worked example (thesis Ch. 13/14).
 //!
 //! The bare parser functions are the atoms (wrapped by the Mol framework
 //! in `templates/`); the concrete `Atom`/`PureAtom` wrapper structs were
-//! pruned as dead code (nothing constructs them in the lib — `fuzz` and
+//! pruned as dead code (nothing constructs them in the lib: `fuzz` and
 //! `af_xdp::process_frame` call the functions directly).
 
 /// Parser failure: an enum of the ways a header can be malformed.

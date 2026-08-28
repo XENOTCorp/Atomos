@@ -9,12 +9,12 @@
 //!
 //! - The H1 datapath allocates nothing per request; keep this module the
 //!   same (borrow `req`, avoid `String`/`Vec` per call). jemalloc /
-//!   mimalloc swaps only affect the control path — see `module_sync.rs`
+//!   mimalloc swaps only affect the control path: see `module_sync.rs`
 //!   for the `#[global_allocator]` pattern.
 //! - Lock-free: if you gate on a shared rate-limiter / token bucket, use
 //!   atomics or `crossbeam-channel`; a `parking_lot` mutex is acceptable
-//!   on the control path but never inside `handle()` (run-to-completion
-//!   — a blocked pre-module stalls the worker).
+//!   on the control path but never inside `handle()` (run-to-completion:
+//!   a blocked pre-module stalls the worker).
 
 use atomos::error::ServeError;
 use atomos::flags::{FlagSet, FLAG_LOG};

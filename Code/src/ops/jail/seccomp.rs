@@ -88,7 +88,7 @@ pub(crate) fn bpf_jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     }
 }
 
-/// AUDIT_ARCH_X86_64 — not always exported by libc.
+/// AUDIT_ARCH_X86_64: not always exported by libc.
 #[cfg(target_os = "linux")]
 pub(crate) const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 

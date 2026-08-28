@@ -21,12 +21,12 @@ pub struct IpState {
     pub errs: u32,
     /// Set once any firewall feature crosses a low-water mark; the
     /// admission gate skips the firewall predicate entirely while this
-    /// is clear (the fast/shortcut path — the firewall cannot fail).
+    /// is clear (the fast/shortcut path: the firewall cannot fail).
     pub hot: bool,
 }
 
 impl IpState {
-    /// `D = (7D + n) >> 3` — the integer EMA, one multiply-add+shift.
+    /// `D = (7D + n) >> 3`: the integer EMA, one multiply-add+shift.
     /// `D` is stored in fixed point with 3 fractional bits (units of
     /// 1/8): a naive `(7D+n)>>3` on integer D can never leave 0
     /// (truncation), so the equivalent `D += n - (D>>3)` form is used,

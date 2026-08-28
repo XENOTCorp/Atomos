@@ -1,7 +1,7 @@
 //! Bounds-safe SIMD helpers (standard \[SIMD\]).
 //!
-//! Discipline: vectorized loops run over array slices only — never past
-//! the slice end — and the remainder is handled by a scalar loop. Length
+//! Discipline: vectorized loops run over array slices only: never past
+//! the slice end: and the remainder is handled by a scalar loop. Length
 //! 0 and unaligned slices are safe (unaligned loads via `_mm256_loadu`).
 //! No vector operation can read or write out of bounds by construction.
 
@@ -149,7 +149,7 @@ mod tests {
         let c = u16_checksum(data);
         assert_eq!(c, checksum_finalize(sum_u16_scalar(data)));
         // One's complement checksum of itself (with the checksum word
-        // included) folds to zero — property check:
+        // included) folds to zero: property check:
         let sum = sum_u16_scalar(data).wrapping_add(c as u32);
         assert_eq!(checksum_finalize(sum), 0);
     }

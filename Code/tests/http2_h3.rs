@@ -167,7 +167,7 @@ use atomos::io::{CacheDirective, Out, OutBody, StreamBody};
 use atomos::module::{AsyncStreamModule, BoxFut, Handler, ModuleMap};
 use atomos::status::Status;
 
-/// Echoes each request-body chunk straight into the response stream —
+/// Echoes each request-body chunk straight into the response stream : 
 /// data flows out as it comes in (no whole-body buffering).
 struct EchoStream;
 

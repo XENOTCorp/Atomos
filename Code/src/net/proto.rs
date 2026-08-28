@@ -12,7 +12,7 @@ use crate::parse::{looks_like_json, scan_json};
 use crate::route::Router;
 use crate::status::Status;
 
-/// Request head, borrowed from the `http::Request` — no per-header
+/// Request head, borrowed from the `http::Request`: no per-header
 /// `String` copies on the tokio paths (the H1 path's zero-alloc
 /// discipline applied to H2/H3 dispatch).
 pub struct Parts<'a> {
@@ -90,7 +90,7 @@ pub async fn dispatch_parts(router: &Router, parts: Parts<'_>, peer: SocketAddr)
 }
 
 /// Streaming dispatch for the tokio paths (h2/h3). The request head is
-/// dispatched **while the body is still arriving** — chunks flow to the
+/// dispatched **while the body is still arriving**: chunks flow to the
 /// module through `body_rx` as the transport reads them. Modules that
 /// opt into `AsyncStreamModule` consume chunks incrementally; anything
 /// else falls back to the buffered `dispatch_parts` (which re-admits

@@ -4,7 +4,7 @@
 //! epoll path sends them with `sendfile` (no userspace copy), and the
 //! tokio paths materialize them into memory. A bounded LRU of open fds
 //! is kept here (the open_file_cache equivalent) so repeated hits never
-//! re-open/re-stat — the response cache never stores File bodies.
+//! re-open/re-stat: the response cache never stores File bodies.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -30,7 +30,7 @@ use crate::status::Status;
 /// re-copies sendfile pages): byte path wins at 64 KiB (27.4k vs 16.5k
 /// req/s), dead even at 128 KiB, sendfile wins at 256 KiB (2.09 vs 1.59
 /// GB/s). On a real NIC sendfile wins from far smaller sizes (no
-/// loopback re-copy) — lower this for NIC deployments. Override with
+/// loopback re-copy): lower this for NIC deployments. Override with
 /// `ATOMOS_SF_MIN` (bytes) for A/B measurement.
 pub const SF_MIN: u64 = 128 * 1024;
 

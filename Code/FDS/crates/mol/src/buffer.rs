@@ -105,7 +105,7 @@ impl<const N: usize> Default for Buffer<N> {
 /// the free-list protocol prevents.
 pub struct Pool<T, const N: usize> {
     /// The arena, heap-allocated. An inline `[MaybeUninit<T>; N]` would
-    /// make `Pool` a `N * size_of::<T>()`-byte by-value type — a 1024-slot
+    /// make `Pool` a `N * size_of::<T>()`-byte by-value type: a 1024-slot
     /// connection table (~200 KiB) would blow a 1 MiB thread stack in
     /// debug builds. The box keeps the struct small; the allocation is
     /// startup-only (the free-list protocol still owns every slot).
@@ -154,7 +154,7 @@ impl<T, const N: usize> Pool<T, N> {
     }
 
     /// Allocate a slot INDEX without a guard. The caller owns the slot
-    /// and MUST call [`Pool::release_index`] exactly once — used by
+    /// and MUST call [`Pool::release_index`] exactly once: used by
     /// completion-driven datapaths that track slot ownership themselves
     /// (a guard would release the slot on drop, which for a long-lived
     /// connection would double-release at close).
@@ -176,7 +176,7 @@ impl<T, const N: usize> Pool<T, N> {
     ///
     /// `&self -> &mut T` is sound here because the pool is interior-mutable
     /// (`UnsafeCell` slots) and exclusive ownership is enforced by the
-    /// free-list protocol, not by the borrow checker — the same contract
+    /// free-list protocol, not by the borrow checker: the same contract
     /// as `PoolGuard`'s deref.
     #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self, idx: usize) -> &mut T {
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(*a, a.index() as u64);
         drop(a);
         // After returning, allocation succeeds again (the free list is a
-        // FIFO ring, so the exact slot is not deterministic — any slot
+        // FIFO ring, so the exact slot is not deterministic: any slot
         // whose value matches its index is correct).
         let a = pool.try_alloc().expect("a free slot again");
         assert_eq!(*a, a.index() as u64);

@@ -1,8 +1,8 @@
 //! Zero-allocation hot-path probe (standard [ALLOC]).
 //!
 //! A counting global allocator records every heap allocation. The declared
-//! hot path — ring ingress/egress, molecule steps, checksums, pool
-//! alloc/return — must perform zero heap allocations; all structures live
+//! hot path: ring ingress/egress, molecule steps, checksums, pool
+//! alloc/return: must perform zero heap allocations; all structures live
 //! inline on the stack or in preallocated arenas. The whole pipeline runs
 //! in one test so no concurrent test-harness thread can allocate mid-probe.
 
@@ -81,7 +81,7 @@ struct Ctx {
     scratch: Buffer<1500>,
 }
 
-/// Effectful molecule: one processing step — checksum the input in the
+/// Effectful molecule: one processing step: checksum the input in the
 /// preallocated scratch buffer and hand the result to the egress ring.
 struct Probe;
 
@@ -105,7 +105,7 @@ impl Molecule for Probe {
 #[test]
 fn reactor_pipeline_allocates_nothing() {
     // Construction (setup, before the watermark): a pool arena is
-    // heap-backed (see `Pool` docs), so build it here — the hot path
+    // heap-backed (see `Pool` docs), so build it here: the hot path
     // below only does allocate/return cycles.
     let pool: Pool<u64, 8> = Pool::new();
     for i in 0..8 {

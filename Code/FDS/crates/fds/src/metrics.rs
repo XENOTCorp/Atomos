@@ -1,5 +1,5 @@
 //! Observability (standard \[OBS\]): lock-free per-core counters (padded
-//! atomics from the framework) and a pull-based Unix socket endpoint —
+//! atomics from the framework) and a pull-based Unix socket endpoint : 
 //! no allocation in the hot path, no HTTP stack. The endpoint accepts
 //! one connection at a time, writes the metrics text, and closes.
 //!
@@ -204,7 +204,7 @@ impl MetricsServer {
     /// Bind the Unix socket at `path`, best-effort-unlinking a stale
     /// socket file first. Unlink failures are ignored: a stale file
     /// owned by another user must not fail the engine with a misleading
-    /// `PermissionDenied` — the bind below then reports the accurate
+    /// `PermissionDenied`: the bind below then reports the accurate
     /// condition (`AddrInUse` when a socket is actually bound there).
     pub fn bind(path: &Path) -> std::io::Result<Self> {
         match std::fs::remove_file(path) {

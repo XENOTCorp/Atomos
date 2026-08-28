@@ -1,7 +1,7 @@
 //! Integer-only request admission, firewall, and priority scheduler.
 //!
 //! Every equation in this module uses only additions, comparisons,
-//! shifts, and min/max — no division, no floating point. All state is
+//! shifts, and min/max: no division, no floating point. All state is
 //! plain integers; the hot structures are a per-IP table (hashbrown)
 //! and a handful of global counters. A request passes through:
 //!
@@ -11,11 +11,11 @@
 //! ```
 //!
 //! Rule modes swap the weights (a "Lawvere theory" per the design):
-//! - `Anarchy`  — FCFS: only wait time matters, per-IP queues unused.
-//! - `MaxAvail` — strong IP-diversity bonus, low demand preferred.
-//! - `Fair`     — weighted fair queuing: priority proportional to
+//! - `Anarchy` : FCFS: only wait time matters, per-IP queues unused.
+//! - `MaxAvail`: strong IP-diversity bonus, low demand preferred.
+//! - `Fair`    : weighted fair queuing: priority proportional to
 //!   inverse demand.
-//! - `Custom`   — user-supplied integer weights from config.
+//! - `Custom`  : user-supplied integer weights from config.
 //!
 //! The optional binarized-neural-network firewall is a trait hook
 //! (`BnnFirewall`); the default is the threshold-rule predicate.
@@ -227,9 +227,6 @@ impl Sched {
         self.ips.entry(key).or_default()
     }
 
-    /// Firewall precondition: every feature under its threshold, or the
-    /// IP is an exception. O(1) comparisons. Demand is fixed-point
-
     pub fn admit_request(&mut self, key: u32) -> Admission {
         // Shortcut 1: global queue bound, before touching the table.
         if self.q_total >= self.limits.q_max {
@@ -266,7 +263,7 @@ impl Sched {
             }
             return Admission::Rejected;
         }
-        // Shortcut 3: firewall predicate — only when armed.
+        // Shortcut 3: firewall predicate: only when armed.
         if ip.hot
             && !ip.exception
             && (ip.demand as i32 > (self.limits.d_limit << 3)
@@ -281,8 +278,6 @@ impl Sched {
         self.q_total += 1;
         Admission::Accepted
     }
-
-    /// Admission score `A_i` (diversity + demand + exception + wait - q).
 
     pub fn admit_conn(&mut self, key: u32) -> bool {
         let c_per_ip = self.limits.c_per_ip;
@@ -376,7 +371,7 @@ mod tests {
         for _ in 0..24 {
             st.demand_update(0);
         }
-        // Decay is `d -= d>>3`, flooring at 4 (real 0.5) — sub-unit
+        // Decay is `d -= d>>3`, flooring at 4 (real 0.5): sub-unit
         // demand that can never trip the firewall.
         assert!(st.demand < 8, "demand after decay = {}", st.demand);
     }

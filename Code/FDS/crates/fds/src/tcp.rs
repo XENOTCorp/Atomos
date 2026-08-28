@@ -1,7 +1,7 @@
 //! TCP transport (standard \[IO\], \[SEC\] minimal state):
 //! nonblocking `accept4` listeners, `readv`/`writev` scatter-gather for
 //! partial reads/writes, `sendfile`/`splice` zero-copy for file-backed
-//! responses (valid-fd discipline — no double-close), and the option set
+//! responses (valid-fd discipline: no double-close), and the option set
 //! from [`crate::config::Config`] (NODELAY default on, QUICKACK, DEFER_ACCEPT,
 //! FASTOPEN config-gated with the spoofing caveat documented, CORK
 //! opt-in). Connection state uses [`crate::conn`] hot/cold halves.
@@ -266,7 +266,7 @@ impl TcpListener {
         Ok(())
     }
 
-    /// The bound local address (getsockname) — authoritative after a
+    /// The bound local address (getsockname): authoritative after a
     /// port-0 bind reports the kernel-assigned port.
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -294,7 +294,7 @@ impl TcpListener {
 
 impl TcpStream {
     /// Read into the buffer, returning bytes read (0 = EOF, Err WouldBlock
-    /// means drained — callers treat WouldBlock as drain-to-EAGAIN).
+    /// means drained: callers treat WouldBlock as drain-to-EAGAIN).
     pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // SAFETY: read writes at most buf.len() bytes into `buf`, which is
         // a valid mutable slice for the duration of the call.
@@ -433,7 +433,7 @@ impl TcpStream {
     /// Zero-copy splice: send `len` bytes from the seekable fd `src_fd`
     /// (e.g. an open file) into this socket. Returns bytes spliced.
     pub fn splice_from_fd(&mut self, src_fd: i32, len: usize) -> std::io::Result<usize> {
-        // SAFETY: `src_fd` is owned by the caller (valid-fd discipline —
+        // SAFETY: `src_fd` is owned by the caller (valid-fd discipline : 
         // we never close it here); SPLICE_F_MOVE is a move hint, not an
         // ownership transfer. At least one end of a splice must be a
         // pipe; file-to-socket fails with EINVAL on Linux, so callers

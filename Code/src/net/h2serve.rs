@@ -22,7 +22,7 @@ use crate::proto;
 use crate::route::Router;
 
 /// Counts every byte crossing the connection (handshake, HPACK header
-/// blocks, frames, bodies) — the wire-side of the compression proxy.
+/// blocks, frames, bodies): the wire-side of the compression proxy.
 pub struct CountingIo<S> {
     inner: S,
     rx: Arc<LineAtomicU64>,
@@ -256,7 +256,7 @@ async fn serve_one(
 }
 
 /// `h2::Error` with an associated `Reason` is a RST_STREAM event
-/// (received or sent) — counted as the RST_STREAM rate.
+/// (received or sent): counted as the RST_STREAM rate.
 trait ResetTrait {
     fn is_reset(&self) -> bool;
 }

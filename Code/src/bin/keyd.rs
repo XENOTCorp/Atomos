@@ -1,4 +1,4 @@
-//! atomos-keyd — private keys out of workers. Single-threaded Unix sign daemon.
+//! atomos-keyd: private keys out of workers. Single-threaded Unix sign daemon.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Write};

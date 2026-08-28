@@ -266,7 +266,7 @@ Public: `epoll::run`, `serve::run`.
 **Files:** all tracked `*.rs`, `*.md`, `*.html`, `*.sh`, `*.toml`
 
 - [ ] **Step 1: Delete** `Code/examples/first_app/rules-keyed.json`
-- [ ] **Step 2: Replace U+2014 and U+2013** with `. ` or `: ` or ` (` `)`. CSS `content:"— "` becomes `content:"- "`.
+- [ ] **Step 2: Replace U+2014 and U+2013** with `. ` or `: ` or ` (` `)`. CSS `content:"- "` becomes `content:"- "`.
 - [ ] **Step 3: Remove** `Alex` and `@AscendNoosphere` from tracked files.
 - [ ] **Step 4:** `python3 -c` scan of tracked files; must print none.
 - [ ] **Step 5:** `cd Code && cargo test --offline && cargo clippy --all-targets -- -D warnings`

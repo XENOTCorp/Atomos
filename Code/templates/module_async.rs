@@ -18,7 +18,7 @@
 //!   #[global_allocator]
 //!   static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 //!   ```
-//! - **Lock-free handoff**: async endpoints are the exception — they can
+//! - **Lock-free handoff**: async endpoints are the exception: they can
 //!   use `tokio::sync::mpsc` (unbounded/`mpsc` with backpressure)
 //!   between the worker and your await point. For CPU-bound fan-out
 //!   prefer `crossbeam-channel` or atomics + a fixed ring. Never take a

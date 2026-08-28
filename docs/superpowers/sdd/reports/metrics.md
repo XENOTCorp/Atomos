@@ -23,9 +23,9 @@ export CARGO_TARGET_DIR=$HOME/.cache/atomos-target-metrics
 cargo test --lib
 ```
 
-- `kernel::metrics::tests::snapshot_is_pure` — pass
-- `kernel::metrics::tests::dispatch_hit_miss_counters` — pass (misses==1, hits>=1, module counter 1)
-- `net::access_log::tests::line_contains_path_and_status` — pass
+- `kernel::metrics::tests::snapshot_is_pure`: pass
+- `kernel::metrics::tests::dispatch_hit_miss_counters`: pass (misses==1, hits>=1, module counter 1)
+- `net::access_log::tests::line_contains_path_and_status`: pass
 - full `--lib`: **83 passed**, 0 failed
 
 ## concerns

@@ -3,7 +3,7 @@
 //! baseline and environment variables override individual fields
 //! (`FDS_<SECTION>_<KEY>`, e.g. `FDS_REACTOR_BUSY_POLL=1`).
 //!
-//! The file is the single repo-root `config.json` (one file, no layering —
+//! The file is the single repo-root `config.json` (one file, no layering : 
 //! sub-project 3 ruling), consumed at startup by the engine. The adaptive
 //! *build-time* tooling (sub-project 3) lives in `build/`: `build.sh`
 //! derives codegen flags from the hardware, and `fds-detect` regenerates
@@ -56,7 +56,7 @@ pub struct CoreConfig {
     /// Pin each worker thread to its own logical CPU.
     pub pin_cores: bool,
     /// Worker thread count; 0 = one per logical CPU (on hyperthreaded
-    /// machines that is 2x the physical core count — the default).
+    /// machines that is 2x the physical core count: the default).
     pub threads: usize,
     /// Stack size for worker threads, in bytes.
     pub stack_bytes: usize,
@@ -76,7 +76,7 @@ impl Default for CoreConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReactorStrategy {
-    /// epoll edge-triggered, busy-poll (timeout 0) — default.
+    /// epoll edge-triggered, busy-poll (timeout 0): default.
     #[default]
     EpollBusyPoll,
     /// io_uring SQPOLL (experimental, feature `io-uring`).
@@ -142,7 +142,7 @@ impl Default for UdpConfig {
             reuseport: true,
             // Off by default: SO_INCOMING_CPU makes reuseport selection
             // prefer the socket matching the RX CPU, which on loopback
-            // (one RX softirq CPU) pins every flow to a single worker —
+            // (one RX softirq CPU) pins every flow to a single worker : 
             // defeating per-core distribution. NIC deployments with
             // RSS/IRQ affinity set it explicitly (see ops-tuning).
             incoming_cpu: false,

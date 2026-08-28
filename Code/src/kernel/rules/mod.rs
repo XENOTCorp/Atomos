@@ -273,7 +273,7 @@ mod tests {
             mk_rule("p", Method::Post.bit(), &["/api/*"], &[]),
         ])
         .unwrap();
-        // Too small for the trie — verify with the forced constructor too.
+        // Too small for the trie: verify with the forced constructor too.
         let rs_t = Ruleset::from_rules_forced(vec![
             mk_rule("g", Method::Get.bit(), &["/api/*"], &[]),
             mk_rule("p", Method::Post.bit(), &["/api/*"], &[]),
@@ -340,7 +340,7 @@ mod tests {
     fn automaton_equals_linear_scan_on_fuzz() {
         let rs = Ruleset::from_rules_forced(forty_rules()).unwrap();
         assert!(rs.trie_active());
-        // Deterministic PRNG (xorshift) — no external deps in tests.
+        // Deterministic PRNG (xorshift): no external deps in tests.
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move || {
             seed ^= seed << 13;

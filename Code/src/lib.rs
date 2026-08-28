@@ -1,15 +1,16 @@
-//! atomos: HTTP kernel in four planes — kernel, net, ops, plugin.
+//! Atomos is an HTTP kernel in four planes: kernel, net, ops, plugin.
 //!
-//! - `kernel` — `In`/`Out`, rules, cache, governor
-//! - `net` — listen/parse/encode + I/O engines (`EngineKind`)
-//! - `ops` — atoms, Unix ctl, supervisor
-//! - `plugin` — directory manifests; Wasm slot; `.so` refused
+//! - `kernel`: `In`/`Out`, rules, cache, governor
+//! - `net`: listen, parse, encode, and I/O engines (`EngineKind`)
+//! - `ops`: atoms, Unix control, supervisor
+//! - `plugin`: directory manifests. Wasm slot. Native `.so` is refused.
 //!
-//! Register modules by name, load a disjoint JSON ruleset, call
-//! `engine::run(EngineKind::Epoll, router, ctx)` or `epoll::run` (blocking H1).
-//! Proto (H2/H3): `serve::run` / `atomos-proto`.
+//! Register modules by name. Load a disjoint JSON ruleset. Call
+//! `engine::run(EngineKind::Epoll, router, ctx)` or `epoll::run` for
+//! blocking HTTP/1.1.
+//! Proto (HTTP/2 and HTTP/3): `serve::run` / `atomos-proto`.
 //!
-//! Criticality C2. Affine Rust mapping.
+//! Criticality C2.
 
 #![deny(warnings)]
 

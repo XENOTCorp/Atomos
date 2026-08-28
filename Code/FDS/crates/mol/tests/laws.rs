@@ -1,6 +1,6 @@
 //! Equational law tests: the algebraic theory of
 //! Mol must hold in the concrete model. Property-style tests over
-//! deterministic sweeps — no external RNG, so the suite stays fast and
+//! deterministic sweeps: no external RNG, so the suite stays fast and
 //! reproducible (standard [TEST]).
 
 use mol::{Molecule, MpmcRing, SpscRing, par, then};
@@ -75,8 +75,8 @@ impl Molecule for Branchy {
 #[test]
 fn then_is_associative() {
     // (f;g);h and f;(g;h) agree on every input. The
-    // state shapes differ (nested tuples) but the observable behavior —
-    // the output stream — is identical.
+    // state shapes differ (nested tuples) but the observable behavior : 
+    // the output stream: is identical.
     let f = Acc(1);
     let g = Add(2);
     let h = Mul(3);
@@ -91,7 +91,7 @@ fn then_is_associative() {
 
 #[test]
 fn interchange_law_holds_with_state() {
-    // (f⊗g);(h⊗k) ≅ (f;h)⊗(g;k) — with stateful molecules on both
+    // (f⊗g);(h⊗k) ≅ (f;h)⊗(g;k): with stateful molecules on both
     // sides. The outputs agree for every input; the states agree up to the
     // canonical reassociation isomorphism ((f,g),(h,k)) ≅ ((f,h),(g,k)).
     let f = Acc(1);
@@ -153,7 +153,7 @@ fn tensor_array_is_elementwise_independent() {
 #[test]
 fn sequential_pipeline_satisfies_its_equation() {
     // Concrete equations hold over a sweep (equations in the model):
-    // (x + 5) * 2 and x * 2 + 5 are both realized — and they differ, so
+    // (x + 5) * 2 and x * 2 + 5 are both realized: and they differ, so
     // order matters (composition is not commutative).
     let a = then(Add(5), Mul(2));
     let b = then(Mul(2), Add(5));
@@ -168,7 +168,7 @@ fn sequential_pipeline_satisfies_its_equation() {
 #[test]
 fn step_is_deterministic() {
     // Determinism: the same molecule, state, and input give the same output and
-    // successor state — on both branches of Branchy.
+    // successor state: on both branches of Branchy.
     let m = Branchy;
     for x in 0..200u32 {
         let mut s1 = 0u32;

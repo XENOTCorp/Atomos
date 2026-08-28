@@ -368,7 +368,7 @@ impl UdpSocket {
         // for the duration of the call (the kernel completes the copy
         // before `sendmsg` returns for non-zerocopy; for zerocopy the
         // caller must keep `data` alive until the completion queue
-        // reports — documented at the call site).
+        // reports: documented at the call site).
         let ret = unsafe {
             libc::sendmsg(self.fd.as_raw_fd(), &hdr, MSG_ZEROCOPY)
         };
@@ -393,7 +393,7 @@ impl UdpSocket {
     /// the buffer until the corresponding notification is drained.
     ///
     /// NOTE: this kernel queues the notification with an EMPTY byte
-    /// range (ee_info == ee_data == 0) for UDP — verified empirically —
+    /// range (ee_info == ee_data == 0) for UDP: verified empirically : 
     /// so the engine recycles buffers by notification count, not by
     /// byte range (the error queue is FIFO and sends are ordered, so
     /// counts are exact even when ranges are not).
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn zerocopy_udp_kernel_behavior() {
         // Documents how THIS kernel handles UDP MSG_ZEROCOPY (assertions
-        // are kernel-agnostic — send integrity only; the behavior is
+        // are kernel-agnostic: send integrity only; the behavior is
         // logged). On this box: the kernel silently COPIES the data at
         // send time (the mutation probe sees the OLD bytes), queues a
         // single coalesced notification with an empty [0,0) byte range,
@@ -609,7 +609,7 @@ mod tests {
         let saw_old = mbuf[..mgot].iter().all(|&b| b == 0xdu8);
         let saw_new = mbuf[..mgot].iter().all(|&b| b == 0x5au8);
         eprintln!(
-            "udp: mutation test — peer saw OLD bytes (copied at send) = {saw_old}, NEW bytes (pages referenced) = {saw_new}"
+            "udp: mutation test: peer saw OLD bytes (copied at send) = {saw_old}, NEW bytes (pages referenced) = {saw_new}"
         );
 
         // Corked probe: the same, with UDP_CORK set (the corked path is
@@ -650,7 +650,7 @@ mod tests {
         let cork_saw_old = cbuf[..cgot].iter().all(|&b| b == 0xeu8);
         let cork_saw_new = cbuf[..cgot].iter().all(|&b| b == 0x3cu8);
         eprintln!(
-            "udp: corked mutation test — OLD (copied) = {cork_saw_old}, NEW (pages referenced) = {cork_saw_new}"
+            "udp: corked mutation test: OLD (copied) = {cork_saw_old}, NEW (pages referenced) = {cork_saw_new}"
         );
     }
 

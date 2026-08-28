@@ -1,4 +1,4 @@
-//! atomos — HTTP/1.1 origin (epoll). Loopback by default. Use atomos-proto for H2/H3.
+//! atomos: HTTP/1.1 origin (epoll). Loopback by default. Use atomos-proto for H2/H3.
 
 use std::path::PathBuf;
 

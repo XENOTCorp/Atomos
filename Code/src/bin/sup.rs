@@ -1,4 +1,4 @@
-//! `atomos-sup` — spawn pinned workers of `atomos` / `first_app`. Does not bind HTTP.
+//! `atomos-sup`: spawn pinned workers of `atomos` / `first_app`. Does not bind HTTP.
 
 use atomos::config::Config;
 use atomos::sup::{self, WorkerSpec};

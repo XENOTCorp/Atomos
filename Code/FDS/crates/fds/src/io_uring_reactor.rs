@@ -1,13 +1,13 @@
 //! The io_uring reactor + transport datapath (feature `io-uring`, via
 //! the `io-uring` crate, tokio-rs): SQPOLL-capable setup, registered
-//! buffers (IORING_REGISTER_BUFFERS), and — when
-//! `reactor.strategy = io-uring` — the engine's UDP + TCP echo runs
+//! buffers (IORING_REGISTER_BUFFERS), and: when
+//! `reactor.strategy = io-uring`: the engine's UDP + TCP echo runs
 //! entirely through the ring instead of the recvmmsg/sendmmsg/readv/
 //! writev syscall datapath.
 //!
 //! Mechanism: the transport fds are **blocking** (O_NONBLOCK cleared in
 //! [`IoUringDatapath::new`]), so an in-flight ring op waits in the
-//! kernel and completes when data arrives — the loop is
+//! kernel and completes when data arrives: the loop is
 //! completion-driven, never EAGAIN-spinning. UDP receives are
 //! IORING_OP_RECVMSG requests (one per preallocated slot), echoes are
 //! IORING_OP_SENDMSG; TCP is IORING_OP_ACCEPT then IORING_OP_READ /
@@ -67,7 +67,7 @@ impl IoUringReactor {
     /// Push a prepared submission queue entry with `user_data` as its
     /// token and record the token as pending. The entry's referenced
     /// memory (iovecs, buffers, sockaddrs) must stay valid and untouched
-    /// until the corresponding completion is drained — the kernel may
+    /// until the corresponding completion is drained: the kernel may
     /// read or write it at any time up to that point.
     pub(crate) fn push(
         &mut self,
@@ -87,7 +87,7 @@ impl IoUringReactor {
     }
 
     /// Register `bufs` with IORING_REGISTER_BUFFERS (returns Err when
-    /// unsupported — caller falls back).
+    /// unsupported: caller falls back).
     pub(crate) fn register_buffers(&mut self, bufs: &mut [&mut [u8]]) -> std::io::Result<()> {
         let iovs: Vec<libc::iovec> = bufs
             .iter_mut()
@@ -185,7 +185,7 @@ fn poll_flags(interest: Interest) -> u32 {
 // ---------------------------------------------------------------------
 
 /// user_data layout: the high nibble is the op class, the low bits the
-/// object (UDP slot index, or a TCP [`ConnectionId`] token — the engine
+/// object (UDP slot index, or a TCP [`ConnectionId`] token: the engine
 /// keeps worker ids < 2^28, so a token's top nibble is always zero and
 /// the two never collide; asserted in `new`).
 const KIND_MASK: u64 = 0xF000_0000_0000_0000;
@@ -314,7 +314,7 @@ impl IoUringDatapath {
 
     /// Run the completion-driven loop until `stop`. When `busy_poll` is
     /// set (the engine's default latency contract), the loop submits and
-    /// syncs the CQ without blocking — completion pickup is immediate at
+    /// syncs the CQ without blocking: completion pickup is immediate at
     /// the cost of CPU while idle, mirroring the epoll worker. Without
     /// it, `submit_and_wait` blocks on the next completion (event-driven,
     /// idle-friendly, but adds wakeup latency). All buffers and the ring
@@ -620,7 +620,7 @@ impl IoUringDatapath {
         // lifetime; the kernel reads it while the op is pending.
         let entry = io_uring::opcode::Timeout::new(&self.timeout as *const io_uring::types::Timespec)
             // count=1: fire when the timespec elapses OR one completion
-            // posts, whichever first — count=0 would be an indefinite
+            // posts, whichever first: count=0 would be an indefinite
             // timeout that never wakes an idle loop.
             .count(1)
             .build()
@@ -739,7 +739,7 @@ mod tests {
         let mut b = [0u8; 64];
         let mut bufs: Vec<&mut [u8]> = vec![&mut a, &mut b];
         // IORING_REGISTER_BUFFERS is supported on modern kernels; either a
-        // success or a graceful Err is acceptable — it must not panic.
+        // success or a graceful Err is acceptable: it must not panic.
         let _ = reactor.register_buffers(&mut bufs);
     }
 

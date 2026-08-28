@@ -114,7 +114,7 @@ pub enum OutBody {
     Raw(Bytes),
     Json(Bytes),
     /// Response body streamed as chunks arrive (tokio path; the H1
-    /// epoll path encodes it as empty — streaming modules are async and
+    /// epoll path encodes it as empty: streaming modules are async and
     /// never dispatch on the sync H1 loop).
     Stream(StreamBody),
     /// Open file range. The H1 epoll path sends it with `sendfile`
@@ -125,7 +125,7 @@ pub enum OutBody {
 }
 
 /// Open file range to be sent with `sendfile` on the H1 epoll path.
-/// The fd stays open for the lifetime of the `Arc` — `StaticMod` keeps
+/// The fd stays open for the lifetime of the `Arc`: `StaticMod` keeps
 /// a bounded LRU of these (the open_file_cache equivalent; stale after
 /// on-disk replace until evicted, same as nginx).
 #[derive(Clone, Debug)]

@@ -83,7 +83,7 @@ async fn epoll_keepalive_many_requests_and_cache_hit() {
         "second GET must be served from the wire cache"
     );
 
-    // Same connection: a missing path must still produce a 404 page —
+    // Same connection: a missing path must still produce a 404 page : 
     // and that request DOES go through dispatch (counter -> 2).
     write!(s, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
     let mut resp = Vec::new();

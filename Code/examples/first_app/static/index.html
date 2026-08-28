@@ -20,7 +20,7 @@ p,li{color:#c5ccd3}
 ul{margin:0;padding:0;list-style:none;border:1px solid #1a1a1a}
 li{padding:10px 14px;border-bottom:1px solid #1a1a1a}
 li:last-child{border-bottom:0}
-li::before{content:"— ";color:#555}
+li::before{content:"- ";color:#555}
 code{font-family:ui-monospace,monospace;font-size:12px;color:#edeff2}
 .muted{color:#6e7378;font-size:11px;margin-top:28px}
 </style>
@@ -30,9 +30,9 @@ code{font-family:ui-monospace,monospace;font-size:12px;color:#edeff2}
 <h1>First web app</h1>
 <p>Three JSON endpoints, a disjoint ruleset, pre/post hooks, RAM notes, response cache on health.</p>
 <ul>
-  <li><code>GET /api/health</code> — liveness, cached 1 s</li>
-  <li><code>GET /api/notes</code> — in-memory store (boot-loaded from notes.json)</li>
-  <li><code>POST /api/notes</code> — <code>{"text":"…"}</code> appends RAM (cap 256)</li>
+  <li><code>GET /api/health</code>: liveness, cached 1 s</li>
+  <li><code>GET /api/notes</code>: in-memory store (boot-loaded from notes.json)</li>
+  <li><code>POST /api/notes</code>: <code>{"text":"…"}</code> appends RAM (cap 256)</li>
 </ul>
 <p class="muted">127.0.0.1:8090 · control /tmp/atomos-first.sock · XENOT</p>
 </body>

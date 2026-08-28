@@ -2,6 +2,7 @@
 use super::{IpState, Sched, Weights};
 
 impl Sched {
+    /// Admission score `A_i` (diversity + demand + exception + wait - q).
     pub fn admission_score(&self, ip: &IpState, w: Weights) -> i32 {
         let div = (ip.queued == 0) as i32;
         (w.div * div)
@@ -22,7 +23,7 @@ impl Sched {
             - (w.qpen * ip.queued as i32)
     }
 
-    /// Core assignment: `argmin(L_c << 8 + Z_{i,c} << 16)` — load
+    /// Core assignment: `argmin(L_c << 8 + Z_{i,c} << 16)`: load
     /// balance with same-IP affinity.
     pub fn core_assign(loads: &[u32], affinity: &[bool]) -> usize {
         let mut best = 0usize;

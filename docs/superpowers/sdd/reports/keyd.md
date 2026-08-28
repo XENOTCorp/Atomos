@@ -21,11 +21,11 @@ cargo test --lib ops::keyproto::
 cargo build --bin atomos-keyd
 ```
 
-**`cargo test --lib ops::keyproto::`:** PASS — 3 passed (`sign_request_roundtrip_bytes`, reply roundtrip, truncated/empty fail-closed).
+**`cargo test --lib ops::keyproto::`:** PASS: 3 passed (`sign_request_roundtrip_bytes`, reply roundtrip, truncated/empty fail-closed).
 
-**`cargo build --bin atomos-keyd`:** FAIL — `src/net/tls.rs:63` unused `pub fn load` under `#![deny(warnings)]` (tls agent left `load` test-only; this brief forbids editing `tls.rs`). Bin **does** compile with command-line `-A dead_code`; runtime smoke (0600 sock, rustls sign, unknown kind → no reply, missing `--key` exit 1) passed.
+**`cargo build --bin atomos-keyd`:** FAIL: `src/net/tls.rs:63` unused `pub fn load` under `#![deny(warnings)]` (tls agent left `load` test-only; this brief forbids editing `tls.rs`). Bin **does** compile with command-line `-A dead_code`; runtime smoke (0600 sock, rustls sign, unknown kind → no reply, missing `--key` exit 1) passed.
 
 ## Concerns
 - **Peer refuse stub:** other-uid not unit-tested (needs a second EUID). Path is `if !jail::peer_euid_ok(fd) { continue; }` (same as `control_std`); documented in `keyd.rs`.
-- Protocol has no signature-scheme byte; keyd picks the first rustls scheme the key supports. Payload is the rustls `Signer` **message** (hashed inside ring), not a pre-hashed digest — later `tls.rs` keyclient must send that message.
+- Protocol has no signature-scheme byte; keyd picks the first rustls scheme the key supports. Payload is the rustls `Signer` **message** (hashed inside ring), not a pre-hashed digest: later `tls.rs` keyclient must send that message.
 - Official `cargo build --bin atomos-keyd` stays red until `tls.rs` uses `load` outside `#[cfg(test)]` (e.g. `TlsHold::get`).

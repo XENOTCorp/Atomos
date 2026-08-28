@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Inhabit every ARCSS-admissible axis of site S (loopback kernel-TCP origin): one concurrency model per process, TCB-split H1 vs proto binaries, jail leftovers, key process, Wasm off cache-hit, effect adapters — without `.so`/Lua and without leaving S.
+**Goal:** Inhabit every ARCSS-admissible axis of site S (loopback kernel-TCP origin): one concurrency model per process, TCB-split H1 vs proto binaries, jail leftovers, key process, Wasm off cache-hit, effect adapters: without `.so`/Lua and without leaving S.
 
 **Architecture:** Coproduct of processes (`atomos` epoll H1 ⊔ `atomos-proto` tokio H2/H3/TLS ⊔ `atomos-sup` ⊔ `atomos-keyd`). Kernel `handle: In → Out` is the unique natural transformation across wire representations. Cache hit is H-07 memoization (no plugin). `.so`/Lua refused (gain theorem in the spec).
 
@@ -25,7 +25,7 @@
 | File | Responsibility |
 |---|---|
 | `src/kernel/config.rs` | Default `engine=epoll`; reject epoll∧(h2∨h3); `worker_shutdown_timeout_ms`; `landlock`/`seccomp` flags |
-| `src/ops/atom.rs` | `AtomCtx` atomics only — no `tokio::sync::Notify` |
+| `src/ops/atom.rs` | `AtomCtx` atomics only: no `tokio::sync::Notify` |
 | `src/net/engine.rs` | Dispatch: epoll blocking; proto async under feature |
 | `src/net/epoll.rs` | `run` blocking join of pinned threads |
 | `src/net/serve.rs` `h2serve.rs` `h3serve.rs` `tls.rs` | `#[cfg(feature = "proto")]` |
@@ -145,7 +145,7 @@ if kind == Some(crate::engine::EngineKind::Xdp) {
 }
 ```
 
-To avoid a kernel→net dependency, move `EngineKind::parse` string check inline in `validate` (`"epoll"|"tokio"|"xdp"|"af-xdp"`) — **kernel must not import `net`**. Duplicate the three names as a `fn engine_ok(s: &str) -> bool` in `config.rs`. Keep `EngineKind` in `net/engine.rs`.
+To avoid a kernel→net dependency, move `EngineKind::parse` string check inline in `validate` (`"epoll"|"tokio"|"xdp"|"af-xdp"`): **kernel must not import `net`**. Duplicate the three names as a `fn engine_ok(s: &str) -> bool` in `config.rs`. Keep `EngineKind` in `net/engine.rs`.
 
 In `src/net/engine.rs`:
 
@@ -177,7 +177,7 @@ export CARGO_TARGET_DIR=$HOME/.cache/atomos-target
 cargo test --lib
 ```
 
-Expected: existing tests that omitted `engine` now get epoll. Any test that needs tokio H2 must set `"engine":"tokio"`. `examples/config.json` currently has `"http2": true, "http3": true` without engine — either add `"engine":"tokio"` (proto example) or drop http2/http3 (H1 example). Split: keep `examples/config.json` as H1 (`engine: epoll`, http2/http3 false); proto example later.
+Expected: existing tests that omitted `engine` now get epoll. Any test that needs tokio H2 must set `"engine":"tokio"`. `examples/config.json` currently has `"http2": true, "http3": true` without engine: either add `"engine":"tokio"` (proto example) or drop http2/http3 (H1 example). Split: keep `examples/config.json` as H1 (`engine: epoll`, http2/http3 false); proto example later.
 
 `tests/http2_h3.rs` must pass `"engine":"tokio"`.
 
@@ -199,7 +199,7 @@ git commit -m "feat: default engine epoll; reject epoll with http2/http3 (I_engi
 - Modify: `src/net/engine.rs` (`Epoll` branch not async)
 - Modify: `src/net/serve.rs` `src/net/h3serve.rs` (local `Notify` or poll `stop`)
 - Modify: `tests/epoll_smoke.rs`
-- Modify: `src/bin/serve.rs` — wait for Task 3 if still `#[tokio::main]`; this task may keep an async wrapper in `engine::run` that only `spawn_blocking`s epoll, then Task 3 removes it
+- Modify: `src/bin/serve.rs`: wait for Task 3 if still `#[tokio::main]`; this task may keep an async wrapper in `engine::run` that only `spawn_blocking`s epoll, then Task 3 removes it
 
 **Interfaces:**
 - Consumes: `AtomCtx { stop: Arc<LineAtomicU8>, ... }`
@@ -218,7 +218,7 @@ fn atom_ctx_has_no_tokio_wake() {
 }
 ```
 
-This test stays as a compile probe: after removing `wake`, any remaining `ctx.wake` fails compile — that **is** the test. Also add in `src/net/epoll.rs`:
+This test stays as a compile probe: after removing `wake`, any remaining `ctx.wake` fails compile: that **is** the test. Also add in `src/net/epoll.rs`:
 
 ```rust
 #[test]
@@ -239,7 +239,7 @@ Expected: FAIL (current `run` is `async fn`).
 
 - [ ] **Step 3: Implementation**
 
-`AtomCtx` — remove `wake`. In `dispatch` paths that called `notify_waiters` (stop/restart atoms around lines 160 and 164 of `atom.rs`), only `stop.v.store(...)`.
+`AtomCtx`: remove `wake`. In `dispatch` paths that called `notify_waiters` (stop/restart atoms around lines 160 and 164 of `atom.rs`), only `stop.v.store(...)`.
 
 `epoll.rs`:
 
@@ -339,7 +339,7 @@ git commit -m "refactor: AtomCtx atomics only; epoll run is blocking (CC-00)"
 
 ---
 
-### Task 3: TCB split — features `proto` / `wasm`, bin `atomos-proto` (I_tcb)
+### Task 3: TCB split: features `proto` / `wasm`, bin `atomos-proto` (I_tcb)
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -347,13 +347,13 @@ git commit -m "refactor: AtomCtx atomics only; epoll run is blocking (CC-00)"
 - Modify: `src/bin/serve.rs` (std `fn main`, call blocking epoll)
 - Modify: `src/lib.rs` (cfg proto re-exports)
 - Modify: `src/net/mod.rs` (`#[cfg(feature = "proto")]` on h2/h3/tls/serve)
-- Modify: `src/ops/control.rs` — split std control server for H1
+- Modify: `src/ops/control.rs`: split std control server for H1
 - Create: `src/ops/control_std.rs` (blocking UnixListener)
 - Modify: tests `http2_h3.rs` → `cargo test --features proto --test http2_h3`
-- Modify: `examples/first_app.rs` if it enables h2/h3 — `--features proto` in its harness docs
+- Modify: `examples/first_app.rs` if it enables h2/h3: `--features proto` in its harness docs
 
 **Interfaces:**
-- Consumes: Task 1–2 types
+- Consumes: Task 1-2 types
 - Produces:
   - features: `default = ["h1"]`, `h1 = []`, `proto = ["dep:h2","dep:h3","dep:h3-quinn","dep:quinn","dep:rustls","dep:rustls-pemfile","dep:tokio-rustls","dep:rcgen"]`, `wasm = ["dep:wasmtime"]`
   - `[[bin]] name = "atomos-proto" path = "src/bin/proto.rs" required-features = ["proto"]`
@@ -499,7 +499,7 @@ pub fn serve_control(path: std::path::PathBuf, ctx: Arc<AtomCtx>) -> Result<(), 
 }
 ```
 
-Match the existing JSON-lines protocol in `control.rs` exactly — read `src/ops/control.rs` fully and copy the command dispatch, only replacing `tokio::net::UnixListener` with `std::os::unix::net::UnixListener`. Do not invent a new schema.
+Match the existing JSON-lines protocol in `control.rs` exactly: read `src/ops/control.rs` fully and copy the command dispatch, only replacing `tokio::net::UnixListener` with `std::os::unix::net::UnixListener`. Do not invent a new schema.
 
 `src/bin/serve.rs`:
 
@@ -550,7 +550,7 @@ Fix `examples/first_app.rs`: gate h2/h3 on `feature = "proto"` or document `carg
 
 ```bash
 git add Cargo.toml src/bin/serve.rs src/bin/proto.rs src/ops/control_std.rs src/ops/mod.rs src/net/mod.rs src/lib.rs src/net/engine.rs examples tests
-git commit -m "feat: TCB split — atomos H1 vs atomos-proto (I_tcb)"
+git commit -m "feat: TCB split: atomos H1 vs atomos-proto (I_tcb)"
 ```
 
 ---
@@ -599,7 +599,7 @@ fn drain_kills_after_timeout() {
 }
 ```
 
-Generation test: parse a tiny helper — if too heavy for unit, test `next_generation` function:
+Generation test: parse a tiny helper: if too heavy for unit, test `next_generation` function:
 
 ```rust
 #[test]
@@ -611,7 +611,7 @@ fn next_generation_increments_and_keeps_n() {
 }
 ```
 
-- [ ] **Step 2: Run — fail on missing field / `drain` arity**
+- [ ] **Step 2: Run: fail on missing field / `drain` arity**
 
 ```bash
 cargo test --lib sup::tests::shutdown_timeout_from_config
@@ -685,7 +685,7 @@ pub fn run(spec: WorkerSpec) -> Result<(), ServeError> {
 
 Heartbeat (minimal unique CC-02): worker already has `ATOMOS_WORKER_INDEX`. Add `ATOMOS_HEARTBEAT_FD` if spec sets it. If the extra fd is too much for this task, document heartbeat as: sup treats **exit** as the heartbeat (already) and add a ctl atom `worker-ping` later. **Do implement** a file-based heartbeat to inhabit the axis:
 
-Worker thread in `epoll::worker` every 5 s: `std::fs::write(runtime_dir.join(format!("atomos-hb-{index}")), b"1")` — **no**, that is not message passing and hits disk (wear). Unique: `libc::write` on an inherited eventfd/pipe.
+Worker thread in `epoll::worker` every 5 s: `std::fs::write(runtime_dir.join(format!("atomos-hb-{index}")), b"1")`: **no**, that is not message passing and hits disk (wear). Unique: `libc::write` on an inherited eventfd/pipe.
 
 In `spawn_one`:
 
@@ -717,7 +717,7 @@ git commit -m "feat: SIGHUP two-generation reload, drain timeout, heartbeat pipe
 
 ---
 
-### Task 5: Jail leftovers — Landlock, seccomp, capset (I_jail)
+### Task 5: Jail leftovers: Landlock, seccomp, capset (I_jail)
 
 **Files:**
 - Modify: `src/ops/jail.rs`
@@ -736,7 +736,7 @@ git commit -m "feat: SIGHUP two-generation reload, drain timeout, heartbeat pipe
 fn after_bind_landlock_blocks_etc_passwd_read_when_enabled() {
     // Only if we can create a throwaway tmp static_root.
     // Skip if not linux. This test calls a helper `landlock_ruleset_for(paths)`
-    // and then tries Open /etc/passwd — must fail with EACCES/EPERM.
+    // and then tries Open /etc/passwd: must fail with EACCES/EPERM.
 }
 ```
 
@@ -763,9 +763,9 @@ Expected: FAIL (identifier missing).
 
 Keep Landlock/seccomp behind `cfg.landlock` / `cfg.seccomp` so tests that exec helpers are not bricked. Default **true** in production config; **false** in unit tests’ JSON.
 
-Do not add `libseccomp` if a raw BPF program in 80 lines works; if BPF is too error-prone, `libseccomp-sys` is an L-02 TCB add — prefer `seccompiler` or a small `libc::syscall(SYS_seccomp, …)` with a documented filter. If the filter cannot be reviewed in one page, ship Landlock first and seccomp as a second commit in this task.
+Do not add `libseccomp` if a raw BPF program in 80 lines works; if BPF is too error-prone, `libseccomp-sys` is an L-02 TCB add: prefer `seccompiler` or a small `libc::syscall(SYS_seccomp, …)` with a documented filter. If the filter cannot be reviewed in one page, ship Landlock first and seccomp as a second commit in this task.
 
-Landlock (Linux 5.13+): use `libc` constants if present; otherwise raw numbers documented for ABI 3. Fail **open with a warn** if `ENOSYS` (old kernel) — loopback origin still safe; fail **closed** if `cfg.landlock` and errno is not ENOSYS/EOPNOTSUPP.
+Landlock (Linux 5.13+): use `libc` constants if present; otherwise raw numbers documented for ABI 3. Fail **open with a warn** if `ENOSYS` (old kernel): loopback origin still safe; fail **closed** if `cfg.landlock` and errno is not ENOSYS/EOPNOTSUPP.
 
 capset: after setuid, `prctl(PR_CAPBSET_DROP, cap)` for 0..63 or `capset` empty. Root-only path already in `drop_privs`.
 
@@ -949,7 +949,7 @@ PluginKind::Wasm => {
 }
 ```
 
-`Router::insert` takes `&self` already. `load_dir` currently has `&Router` — good.
+`Router::insert` takes `&self` already. `load_dir` currently has `&Router`: good.
 
 Wasm `handle` must copy `In` into WIT `request` (owned lists). Bound: `body.len() ≤ max_body_bytes` already. Fuel: `cfg.wasm_fuel` default 10_000_000. Epoch: `Engine::increment_epoch` from a 10 ms tick thread started once per process in `wasm::init()`.
 
@@ -974,11 +974,11 @@ git commit -m "feat: wasmtime host with fuel/epoch; cache hit still skips plugin
 ### Task 8: Proto tickets/OCSP, metrics/log, smuggling, docs occupancy
 
 **Files:**
-- Modify: `src/net/tls.rs` — ticket key `ArcSwap<[u8; 32]>`, rotate atom; OCSP file `tls_ocsp` path stapled
-- Create: `src/kernel/metrics.rs` — `LineAtomicU64` counters: `hits`, `misses`, `requests`, `bytes_out`
-- Create: `src/kernel/metrics_mod.rs` or `src/ops/metrics_atom.rs` — Module `metrics` renders Prometheus text from atomics (pure snapshot)
-- Create: `src/net/access_log.rs` — after successful encode, if `out.flags` contains `FLAG_LOG` or config `access_log: true`, write one line to fd (bounded, no `format!` on hot path if possible; `itoa`)
-- Modify: `src/kernel/route.rs` — increment metrics; **not** on a mutex; atomics only
+- Modify: `src/net/tls.rs`: ticket key `ArcSwap<[u8; 32]>`, rotate atom; OCSP file `tls_ocsp` path stapled
+- Create: `src/kernel/metrics.rs`: `LineAtomicU64` counters: `hits`, `misses`, `requests`, `bytes_out`
+- Create: `src/kernel/metrics_mod.rs` or `src/ops/metrics_atom.rs`: Module `metrics` renders Prometheus text from atomics (pure snapshot)
+- Create: `src/net/access_log.rs`: after successful encode, if `out.flags` contains `FLAG_LOG` or config `access_log: true`, write one line to fd (bounded, no `format!` on hot path if possible; `itoa`)
+- Modify: `src/kernel/route.rs`: increment metrics; **not** on a mutex; atomics only
 - Create: `tests/smuggling.rs`
 - Modify: `docs/architecture.md` (five processes, CC-00 models)
 - Modify: `docs/planes.md` `docs/lack.md` `docs/scorecard.md` (recount have/partial/forfeit **only** for items this plan actually landed)
@@ -1089,7 +1089,7 @@ Do not implement unless a **new** matrix in `docs/h04-matrix.md` shows gain ≫ 
 | 8 projections | docs in Task 8 |
 | 10 bind 8082 | all tests |
 
-Privilege-separated config parse: folded into Task 4 (`atomos-sup` can `Config::load_path` and pass `--config` to children — already argv). No extra parser process unless a later spec.
+Privilege-separated config parse: folded into Task 4 (`atomos-sup` can `Config::load_path` and pass `--config` to children: already argv). No extra parser process unless a later spec.
 
 Placeholder scan: no TBD/TODO/implement-later.
 

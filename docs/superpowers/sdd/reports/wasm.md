@@ -24,8 +24,8 @@ cargo test --lib plugin::
 cargo test --features wasm --lib plugin::
 ```
 
-- `cargo test --lib plugin::` — **ok**. 3 passed (parses_wasm_manifest, native_so_is_refused, wasm_kind_without_feature_errors).
-- `cargo test --features wasm --lib plugin::` — **ok**. 7 passed, 1 ignored (native_so_is_refused, wasm_kind_missing_component_is_config, fuel_to_capacity_{out_of_fuel,interrupt,other_trap}, load_missing_wasm_is_config; ignored wasm_fuel_exhaustion_is_capacity).
+- `cargo test --lib plugin::`: **ok**. 3 passed (parses_wasm_manifest, native_so_is_refused, wasm_kind_without_feature_errors).
+- `cargo test --features wasm --lib plugin::`: **ok**. 7 passed, 1 ignored (native_so_is_refused, wasm_kind_missing_component_is_config, fuel_to_capacity_{out_of_fuel,interrupt,other_trap}, load_missing_wasm_is_config; ignored wasm_fuel_exhaustion_is_capacity).
 
 ## concerns
 

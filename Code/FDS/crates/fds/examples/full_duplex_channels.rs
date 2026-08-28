@@ -79,7 +79,7 @@ fn flush(chan: &mut Chan, reactor: &Reactor, token: u64) -> bool {
         }
     }
     if chan.off < chan.tx.len() {
-        // Write backlog: stop reading until it drains (backpressure —
+        // Write backlog: stop reading until it drains (backpressure : 
         // the pending buffer stays bounded by one receive burst).
         let _ = reactor.modify(chan.stream.as_raw_fd(), token, Interest::Writable);
         return true;

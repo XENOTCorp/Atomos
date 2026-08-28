@@ -15,10 +15,10 @@ CARGO_TARGET_DIR=$HOME/.cache/atomos-target cargo test --lib molecule::
 
 | Test | Outcome |
 |------|---------|
-| `hybrid_effect_before_pure_is_err` | ok — `MoleculeKind::Hybrid` rejects Effectful-before-Pure |
+| `hybrid_effect_before_pure_is_err` | ok: `MoleculeKind::Hybrid` rejects Effectful-before-Pure |
 | `hybrid_pure_then_effect_is_ok` | ok |
-| `restart_is_effectful` | ok — `MoleculeKind::Effectful` |
-| `ops_dashboard_is_pure` | ok — `MoleculeKind::Pure` |
+| `restart_is_effectful` | ok: `MoleculeKind::Effectful` |
+| `ops_dashboard_is_pure` | ok: `MoleculeKind::Pure` |
 
 Confirmed: `MoleculeKind::{Pure, Effectful, Hybrid}` exists; hybrid with effect before pure fails load-time validation.
 
@@ -40,20 +40,20 @@ Atomos re-exports kernel modules at crate root and `net::serve` / `ops::control`
 |-------------------|-------------------|-------|
 | `xenot_serve::io` | `atomos::io` | `Body`, `In`, `InOwned`, `Method`, `Out`, `HeaderView` |
 | `xenot_serve::module` | `atomos::module` | `AsyncModule`, `BoxFut`, `Handler` |
-| `xenot_serve::route` | `atomos::route` | `Router` — **struct layout differs** (below) |
+| `xenot_serve::route` | `atomos::route` | `Router`: **struct layout differs** (below) |
 | `xenot_serve::rules` | `atomos::rules` | `Ruleset` |
 | `xenot_serve::static_mod` | `atomos::static_mod` | `StaticMod` |
 | `xenot_serve::status` | `atomos::status` | `Status` |
 | `xenot_serve::error_page` | `atomos::error_page` | `ErrorPage` (`builtin` / `load` present) |
 | `xenot_serve::error` | `atomos::error` | `ServeError`, `AtomError` |
-| `xenot_serve::atom` | `atomos::atom` | `AtomCtx` — fields match |
+| `xenot_serve::atom` | `atomos::atom` | `AtomCtx`: fields match |
 | `xenot_serve::align` | `atomos::align` | `LineAtomicU8` |
 | `xenot_serve::cache` | `atomos::cache` | `ResponseCache` |
 | `xenot_serve::governor` | `atomos::governor` | `Governor::from_config` |
-| `xenot_serve::config` | `atomos::config` | `Config::from_json` — **extra fields / defaults differ** |
+| `xenot_serve::config` | `atomos::config` | `Config::from_json`: **extra fields / defaults differ** |
 | `xenot_serve::flags` | `atomos::flags` | `FlagSet` |
-| `xenot_serve::serve` | `atomos::serve` (`net::serve`) | `serve::run(router, ctx)` — same arity; Atomos adds `refuse_ports` gate |
-| `xenot_serve::control` | `atomos::control` (`ops::control`) | `control::serve_control(path, ctx)` — same async signature; Atomos also prepares socket dir / peer euid |
+| `xenot_serve::serve` | `atomos::serve` (`net::serve`) | `serve::run(router, ctx)`: same arity; Atomos adds `refuse_ports` gate |
+| `xenot_serve::control` | `atomos::control` (`ops::control`) | `control::serve_control(path, ctx)`: same async signature; Atomos also prepares socket dir / peer euid |
 
 Also available on Atomos (unused by HYPERSCIRET today): `atomos::molecule`, `metrics`, `engine`, `epoll`, `listen`, `parse`, `json_out`, `jail`, `ctl`, `sup`, `plugin`, …
 
@@ -130,7 +130,7 @@ Diffs:
 | Default bind | `127.0.0.1:8082` | `127.0.0.1:8090` |
 | `refuse_ports` | absent | `Vec<u16>` (default empty; enforced in `serve::run` / `epoll::run`) |
 | `queue_cap` | present | **removed** |
-| Extra fields | — | `cpu_pin`, `http2`, `http3`, `tls_*`, `engine`, `plugin_dir`, jail/landlock/seccomp, `access_log`, `wasm_fuel`, `keyd_sock`, … |
+| Extra fields |: | `cpu_pin`, `http2`, `http3`, `tls_*`, `engine`, `plugin_dir`, jail/landlock/seccomp, `access_log`, `wasm_fuel`, `keyd_sock`, … |
 | Default workers | `2` | `available_parallelism()` |
 | Default control socket | `/tmp/xenot-serve.sock` | `$XDG_RUNTIME_DIR/atomos.sock` (via `runtime_dir()`) |
 | Default `engine` | n/a | `"epoll"` |
@@ -159,7 +159,7 @@ Atomos adds `jail::prepare_socket_dir` and peer-euid checks. Sync variant: `atom
 
 Why:
 
-1. **`Router` layout** — HYPERSCIRET constructs `Router { modules: ModuleMap, … }` without `metrics`. Atomos requires `modules: Arc<ArcSwap<ModuleMap>>` and `metrics: Arc<Metrics>`. Struct literal fails to compile after rename alone.
+1. **`Router` layout**: HYPERSCIRET constructs `Router { modules: ModuleMap, … }` without `metrics`. Atomos requires `modules: Arc<ArcSwap<ModuleMap>>` and `metrics: Arc<Metrics>`. Struct literal fails to compile after rename alone.
 2. Secondary (runtime / policy, not the first compile break): Atomos `Config` default bind **8090** and optional **`refuse_ports`**; path-dep pulls rustls/h2/h3/quinn. App JSON that omits `engine` gets `engine=epoll` under Atomos (harmless if calling `serve::run` directly, but differs from xenot-serve’s sole tokio accept loop).
 
 A rename-only change of `xenot_serve` → `atomos` in imports is therefore insufficient; `build_router` (and any other `Router { … }` sites) must be adapted.
@@ -173,7 +173,7 @@ A rename-only change of `xenot_serve` → `atomos` in imports is therefore insuf
 
 Use Atomos `refuse_ports` (config or host overlay) to hard-fail accidental 8082 binds in Atomos processes. Do not change live HYPERSCIRET bind as part of an Atomos-only cutover experiment.
 
-## Recommended cutover steps (LAST — after HYPERSCIRET tests green)
+## Recommended cutover steps (LAST: after HYPERSCIRET tests green)
 
 Do **not** start these until PaperRetrieval’s own test suite is green on xenot-serve.
 

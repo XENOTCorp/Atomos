@@ -5,9 +5,9 @@ use super::parse::{Pat, PatKind, Rule};
 /// Measured crossover (release build, `cargo test --release -- --ignored
 /// crossover_scan_vs_trie`, recorded in bench-results/route-crossover):
 /// scan is affine in R (~4.2 ns/rule; 5.9 ns at R=2, 25.8 at R=8, 59.6
-/// at R=16) while the automaton is flat (~35–44 ns); the fitted
-/// crossover is R≈10–12, and on the measured grid {2,4,8,16,…} the trie
-/// first wins at R=16 — the lattice minimum. The
+/// at R=16) while the automaton is flat (~35-44 ns); the fitted
+/// crossover is R≈10-12, and on the measured grid {2,4,8,16,…} the trie
+/// first wins at R=16: the lattice minimum. The
 /// production configs in `templates/` (R ≤ 8) therefore keep the scan,
 /// which the theorem says is the cheaper realization there.
 pub(crate) const TRIE_MIN_RULES: usize = 16;
@@ -95,7 +95,7 @@ impl PathTrie {
 
     /// One pass over the path bytes; `cand` is the first include
     /// terminal whose method mask admits the request (at most one rule
-    /// can ever match a path — `assert_disjoint` is the load-time
+    /// can ever match a path: `assert_disjoint` is the load-time
     /// theorem this relies on). An exclude of the candidate anywhere on
     /// the path vetoes the match, mirroring `pat_match` exactly: prefix
     /// excludes fire when visited, exact excludes only at the final

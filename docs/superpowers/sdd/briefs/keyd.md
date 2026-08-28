@@ -1,7 +1,7 @@
 # Brief: atomos-keyd
 
 Repo: `/home/xenot/Projects/Atomos`
-Cargo.toml already has `[[bin]] name = "atomos-keyd" path = "src/bin/keyd.rs"` — you MUST create that file so the crate compiles.
+Cargo.toml already has `[[bin]] name = "atomos-keyd" path = "src/bin/keyd.rs"`: you MUST create that file so the crate compiles.
 
 You MAY create:
 - `src/bin/keyd.rs`
@@ -33,7 +33,7 @@ Same for replies.
 `sign_request_roundtrip_bytes` in keyproto.
 Stub `peer` refuse: document.
 
-Default `cargo test --lib` MUST compile: `src/bin/keyd.rs` must exist even if key crypto is a stub that signs SHA-256 HMAC-like with file bytes for tests — prefer real rustls sign.
+Default `cargo test --lib` MUST compile: `src/bin/keyd.rs` must exist even if key crypto is a stub that signs SHA-256 HMAC-like with file bytes for tests: prefer real rustls sign.
 
 Report: `/home/xenot/Projects/Atomos/docs/superpowers/sdd/reports/keyd.md`
 No subagents. No git commit.

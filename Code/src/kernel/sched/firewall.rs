@@ -8,6 +8,8 @@ pub trait BnnFirewall: Send + Sync {
 }
 
 impl Sched {
+    /// Firewall precondition: every feature under its threshold, or the
+    /// IP is an exception. O(1) comparisons. Demand is fixed-point.
     pub fn firewall_pass(&self, ip: &IpState) -> bool {
         if ip.exception {
             return true;

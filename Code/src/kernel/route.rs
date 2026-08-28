@@ -30,7 +30,7 @@ pub struct Router {
     pub metrics: Arc<Metrics>,
     /// Integer admission scheduler shards (firewall + bounds + rule-mode
     /// priority). See `crate::sched`. Sharded by IP hash so concurrent
-    /// tokio workers don't contend on one mutex.
+    /// tokio workers do not contend on one mutex.
     pub sched: Vec<Arc<parking_lot::Mutex<crate::sched::Sched>>>,
 }
 

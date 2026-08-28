@@ -1,4 +1,4 @@
-//! atomos-ctl — operator CLI / JSON API. Separate process from the HTTP server.
+//! atomos-ctl: operator CLI / JSON API. Separate process from the HTTP server.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

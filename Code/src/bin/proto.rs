@@ -1,4 +1,4 @@
-//! atomos-proto — HTTP/2 + HTTP/3 + TLS (tokio). Not the H1 fast path.
+//! atomos-proto: HTTP/2 + HTTP/3 + TLS (tokio). Not the H1 fast path.
 
 use std::path::PathBuf;
 

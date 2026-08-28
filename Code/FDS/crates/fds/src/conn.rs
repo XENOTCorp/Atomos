@@ -139,7 +139,7 @@ impl<const CAP: usize> ConnTable<CAP> {
         self.pool.in_use()
     }
 
-    /// Release a slot back to the free list (the caller must own it —
+    /// Release a slot back to the free list (the caller must own it : 
     /// e.g. after closing a connection). The slot's data stays in place
     /// for the next owner.
     pub fn release_slot(&self, slot: usize) {
@@ -147,7 +147,7 @@ impl<const CAP: usize> ConnTable<CAP> {
     }
 
     /// Mutable access to an owned slot's connection (the caller must own
-    /// the slot — e.g. the reactor holds it for a live connection).
+    /// the slot: e.g. the reactor holds it for a live connection).
     pub fn conn_mut(&self, slot: usize) -> &mut Connection {
         self.pool.get_mut(slot)
     }

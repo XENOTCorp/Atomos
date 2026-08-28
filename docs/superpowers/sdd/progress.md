@@ -1,4 +1,4 @@
-# SDD ledger — plan: docs/superpowers/plans/2026-08-20-maximal-origin.md
+# SDD ledger: plan: docs/superpowers/plans/2026-08-20-maximal-origin.md
 
 Ruling: User asked for many parallel agents in ~/Projects/Atomos. Exclusive files; separate CARGO_TARGET_DIR per agent. No git commit. No 8082.
 

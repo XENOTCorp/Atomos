@@ -42,7 +42,7 @@ async fn main() {
     let count: usize = get(&args, "--count", "2000").parse().expect("count");
     let h2_addr: SocketAddr = format!("127.0.0.1:{h2_port}").parse().expect("h2 addr");
     let h3_addr: SocketAddr = format!("127.0.0.1:{h3_port}").parse().expect("h3 addr");
-    println!("# H2/H3 tokio-path bench — h2c {h2_addr} / h3 {h3_addr}, {count} reqs");
+    println!("# H2/H3 tokio-path bench: h2c {h2_addr} / h3 {h3_addr}, {count} reqs");
     h2_phase(h2_addr, count).await;
     h3_phase(h3_addr, count).await;
 }
@@ -108,7 +108,7 @@ async fn h2_phase(addr: SocketAddr, count: usize) {
     }
     let wall = t0.elapsed().as_secs_f64();
     println!(
-        "seq: {:.0} req/s — p50 {:.1}us p90 {:.1}us p99 {:.1}us p999 {:.1}us",
+        "seq: {:.0} req/s: p50 {:.1}us p90 {:.1}us p99 {:.1}us p999 {:.1}us",
         count as f64 / wall,
         pct(lat.clone(), 0.5) as f64 / 1e3,
         pct(lat.clone(), 0.9) as f64 / 1e3,
@@ -197,7 +197,7 @@ async fn h2_phase(addr: SocketAddr, count: usize) {
     let steady_wire = (after - mid) as i64 / 500;
     let raw_per = raw / streams.max(1);
     println!(
-        "hpack-proxy: raw headers/req {raw_per}B — wire/req first {first_wire}B, steady {steady_wire}B (static-table hits shrink the wire side)"
+        "hpack-proxy: raw headers/req {raw_per}B: wire/req first {first_wire}B, steady {steady_wire}B (static-table hits shrink the wire side)"
     );
 }
 
@@ -251,7 +251,7 @@ async fn h3_phase(addr: SocketAddr, count: usize) {
     }
     let wall = t0.elapsed().as_secs_f64();
     println!(
-        "seq: {:.0} req/s — p50 {:.1}us p90 {:.1}us p99 {:.1}us p999 {:.1}us",
+        "seq: {:.0} req/s: p50 {:.1}us p90 {:.1}us p99 {:.1}us p999 {:.1}us",
         count as f64 / wall,
         pct(lat.clone(), 0.5) as f64 / 1e3,
         pct(lat.clone(), 0.9) as f64 / 1e3,

@@ -4,7 +4,7 @@ use crate::config::{Config, MemoryMode};
 
 /// RSS is re-read at most this often per worker; memory pressure does
 /// not move at request granularity, and a `/proc/self/status` read is
-/// ~µs — it must not sit on the hot path (measured: ~60% of CPU on the
+/// ~µs: it must not sit on the hot path (measured: ~60% of CPU on the
 /// H2 path before this cache).
 const RSS_TTL: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -72,7 +72,7 @@ fn clock_ticks_per_sec() -> f32 {
 
 fn cpu_ticks() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/self/stat").ok()?;
-    // pid comm state ppid ... utime(14) stime(15) — comm may contain spaces in parens.
+    // pid comm state ppid ... utime(14) stime(15): comm may contain spaces in parens.
     let rest = s.rsplit(')').next()?;
     let mut it = rest.split_whitespace();
     // fields after comm: state=1 … utime=12, stime=13 in this split
