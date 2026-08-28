@@ -53,6 +53,7 @@ pub const SECCOMP_ALLOW: &[i64] = &[
     libc::SYS_prctl,
     libc::SYS_recvmsg,
     libc::SYS_sendmsg,
+    libc::SYS_sendfile,
 ];
 
 #[cfg(target_os = "linux")]

@@ -1,13 +1,13 @@
 //! The io_uring reactor + transport datapath (feature `io-uring`, via
 //! the `io-uring` crate, tokio-rs): SQPOLL-capable setup, registered
-//! buffers (IORING_REGISTER_BUFFERS), and: when
-//! `reactor.strategy = io-uring`: the engine's UDP + TCP echo runs
+//! buffers (IORING_REGISTER_BUFFERS), and; when
+//! `reactor.strategy = io-uring`; the engine's UDP + TCP echo runs
 //! entirely through the ring instead of the recvmmsg/sendmmsg/readv/
 //! writev syscall datapath.
 //!
 //! Mechanism: the transport fds are **blocking** (O_NONBLOCK cleared in
 //! [`IoUringDatapath::new`]), so an in-flight ring op waits in the
-//! kernel and completes when data arrives: the loop is
+//! kernel and completes when data arrives; the loop is
 //! completion-driven, never EAGAIN-spinning. UDP receives are
 //! IORING_OP_RECVMSG requests (one per preallocated slot), echoes are
 //! IORING_OP_SENDMSG; TCP is IORING_OP_ACCEPT then IORING_OP_READ /
@@ -29,7 +29,7 @@ use crate::metrics::{Metrics, MetricsServer};
 use crate::reactor::Interest;
 
 /// An io_uring reactor instance.
-pub(crate) struct IoUringReactor {
+pub struct IoUringReactor {
     /// The io_uring instance (SQPOLL when requested and permitted).
     ring: io_uring::IoUring,
     /// user_data tokens of requests submitted but not yet drained.
@@ -42,7 +42,7 @@ impl IoUringReactor {
     /// the kernel rejects it with EPERM the setup falls back to a plain
     /// ring without an SQPOLL thread so unprivileged runs degrade
     /// gracefully.
-    pub(crate) fn new(entries: u32, sq_thread: u32) -> std::io::Result<Self> {
+    pub fn new(entries: u32, sq_thread: u32) -> std::io::Result<Self> {
         let mut builder = io_uring::IoUring::builder();
         if sq_thread > 0 {
             builder.setup_sqpoll(sq_thread);
@@ -67,9 +67,9 @@ impl IoUringReactor {
     /// Push a prepared submission queue entry with `user_data` as its
     /// token and record the token as pending. The entry's referenced
     /// memory (iovecs, buffers, sockaddrs) must stay valid and untouched
-    /// until the corresponding completion is drained: the kernel may
+    /// until the corresponding completion is drained; the kernel may
     /// read or write it at any time up to that point.
-    pub(crate) fn push(
+    pub fn push(
         &mut self,
         user_data: u64,
         entry: io_uring::squeue::Entry,
@@ -87,8 +87,8 @@ impl IoUringReactor {
     }
 
     /// Register `bufs` with IORING_REGISTER_BUFFERS (returns Err when
-    /// unsupported: caller falls back).
-    pub(crate) fn register_buffers(&mut self, bufs: &mut [&mut [u8]]) -> std::io::Result<()> {
+    /// unsupported; caller falls back).
+    pub fn register_buffers(&mut self, bufs: &mut [&mut [u8]]) -> std::io::Result<()> {
         let iovs: Vec<libc::iovec> = bufs
             .iter_mut()
             .map(|b| libc::iovec {
@@ -106,7 +106,7 @@ impl IoUringReactor {
     /// Submit a single-shot poll for `fd`'s readiness (`flags` are
     /// `<poll.h>` bits, e.g. `POLLIN`) with `user_data` as the token.
     /// Completes once; the caller re-arms by submitting again.
-    pub(crate) fn submit_poll(
+    pub fn submit_poll(
         &mut self,
         fd: i32,
         flags: u32,
@@ -129,20 +129,20 @@ impl IoUringReactor {
     }
 
     /// Submit everything currently in the submission queue (no wait).
-    pub(crate) fn submit_all(&mut self) -> std::io::Result<()> {
+    pub fn submit_all(&mut self) -> std::io::Result<()> {
         self.ring.submit().map(|_| ())
     }
 
     /// Submit and block until at least one completion arrives (used by
     /// the datapath's event loop; the periodic timeout op guarantees a
     /// completion even when the sockets are idle).
-    pub(crate) fn submit_and_wait(&mut self, n: u32) -> std::io::Result<()> {
+    pub fn submit_and_wait(&mut self, n: u32) -> std::io::Result<()> {
         self.ring.submit_and_wait(n as usize).map(|_| ())
     }
 
     /// Drain completed entries, calling `f(token, result)`. Returns the
     /// number of completions.
-    pub(crate) fn drain<F: FnMut(u64, std::io::Result<u32>)>(&mut self, mut f: F) -> usize {
+    pub fn drain<F: FnMut(u64, std::io::Result<u32>)>(&mut self, mut f: F) -> usize {
         let mut cq = self.ring.completion();
         cq.sync();
         let mut n = 0;
@@ -185,7 +185,7 @@ fn poll_flags(interest: Interest) -> u32 {
 // ---------------------------------------------------------------------
 
 /// user_data layout: the high nibble is the op class, the low bits the
-/// object (UDP slot index, or a TCP [`ConnectionId`] token: the engine
+/// object (UDP slot index, or a TCP [`ConnectionId`] token; the engine
 /// keeps worker ids < 2^28, so a token's top nibble is always zero and
 /// the two never collide; asserted in `new`).
 const KIND_MASK: u64 = 0xF000_0000_0000_0000;
@@ -231,7 +231,7 @@ struct TcpRingConn {
 }
 
 /// The completion-driven UDP + TCP echo datapath.
-pub(crate) struct IoUringDatapath {
+pub struct IoUringDatapath {
     ring: IoUringReactor,
     core: usize,
     udp_fd: i32,
@@ -258,7 +258,7 @@ impl IoUringDatapath {
     /// Build the datapath for one worker. `udp_fd`/`listen_fd` are
     /// borrowed (owned by the engine's sockets); both are switched to
     /// blocking so ring ops wait in-kernel instead of EAGAINing.
-    pub(crate) fn new(
+    pub fn new(
         core: usize,
         udp_fd: i32,
         listen_fd: i32,
@@ -314,12 +314,12 @@ impl IoUringDatapath {
 
     /// Run the completion-driven loop until `stop`. When `busy_poll` is
     /// set (the engine's default latency contract), the loop submits and
-    /// syncs the CQ without blocking: completion pickup is immediate at
+    /// syncs the CQ without blocking; completion pickup is immediate at
     /// the cost of CPU while idle, mirroring the epoll worker. Without
     /// it, `submit_and_wait` blocks on the next completion (event-driven,
     /// idle-friendly, but adds wakeup latency). All buffers and the ring
     /// live for the datapath's lifetime; nothing allocates per event.
-    pub(crate) fn run(
+    pub fn run(
         &mut self,
         stop: &(dyn Fn() -> bool + Send + Sync),
         metrics: &Metrics,
@@ -620,7 +620,7 @@ impl IoUringDatapath {
         // lifetime; the kernel reads it while the op is pending.
         let entry = io_uring::opcode::Timeout::new(&self.timeout as *const io_uring::types::Timespec)
             // count=1: fire when the timespec elapses OR one completion
-            // posts, whichever first: count=0 would be an indefinite
+            // posts, whichever first; count=0 would be an indefinite
             // timeout that never wakes an idle loop.
             .count(1)
             .build()
@@ -739,7 +739,7 @@ mod tests {
         let mut b = [0u8; 64];
         let mut bufs: Vec<&mut [u8]> = vec![&mut a, &mut b];
         // IORING_REGISTER_BUFFERS is supported on modern kernels; either a
-        // success or a graceful Err is acceptable: it must not panic.
+        // success or a graceful Err is acceptable; it must not panic.
         let _ = reactor.register_buffers(&mut bufs);
     }
 

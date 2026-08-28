@@ -5,11 +5,31 @@ use super::conn::Conn;
 
 pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
     while c.out_off < c.out.len() {
-        match c.stream.write_all(&c.out[c.out_off..]) {
-            Ok(()) => c.out_off = c.out.len(),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(e) => return Err(e),
+        let rest = &c.out[c.out_off..];
+        // Same syscall as FDS `write_all` (`send` + MSG_NOSIGNAL), but
+        // the offset is kept so a partial write does not drop the tail.
+        let n = unsafe {
+            libc::send(
+                c.stream.as_raw_fd(),
+                rest.as_ptr() as *const libc::c_void,
+                rest.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::WouldBlock {
+                return Ok(());
+            }
+            return Err(e);
         }
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "epoll: send zero",
+            ));
+        }
+        c.out_off += n as usize;
     }
     c.out.clear();
     c.out_off = 0;

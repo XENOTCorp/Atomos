@@ -15,7 +15,7 @@
 //! attribute goes on the extern block. Public API below is binding; the
 //! crate compiles with these stubs. Tests: bind/connect over loopback
 //! (skipped gracefully with an eprintln when `socket(AF_SCTP, ...)` fails
-//!: kernel SCTP module absent), send/recv roundtrip with stream ids,
+//! because the kernel SCTP module is absent), send/recv roundtrip with stream ids,
 //! SCTP_NODELAY option set, peeloff exercised if the kernel supports it.
 
 use crate::config::SctpConfig;
@@ -43,7 +43,7 @@ const SOL_SCTP: libc::c_int = 132;
 /// binding keeps `u32` throughout.
 type SctpAssocT = u32;
 
-/// `struct sctp_initmsg`: the SCTP_INITMSG socket option.
+/// `struct sctp_initmsg`; the SCTP_INITMSG socket option.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct SctpInitMsg {
@@ -53,7 +53,7 @@ struct SctpInitMsg {
     sinit_max_init_timeo: u16,
 }
 
-/// `struct sctp_sndrcvinfo`: filled by `sctp_recvmsg` per message.
+/// `struct sctp_sndrcvinfo`; filled by `sctp_recvmsg` per message.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct SctpSndRcvInfo {
@@ -68,7 +68,7 @@ struct SctpSndRcvInfo {
     sinfo_assoc_id: SctpAssocT,
 }
 
-/// `struct sctp_event_subscribe`: the SCTP_EVENTS socket option. The
+/// `struct sctp_event_subscribe`; the SCTP_EVENTS socket option. The
 /// last member keeps the kernel header's spelling: `sctp_send_failure_event_event`
 /// is a preserved typo in <linux/sctp.h>.
 #[repr(C)]
@@ -94,7 +94,7 @@ struct SctpEventSubscribe {
 // without matching `<netinet/sctp.h>` and the installed libsctp ABI.
 #[link(name = "sctp")]
 extern "C" {
-    /// `ssize_t sctp_sendmsg(...)`: verified `ssize_t` against the
+    /// `ssize_t sctp_sendmsg(...)`; verified `ssize_t` against the
     /// installed libsctp 1.0.21 (errors come back as a 64-bit -1).
     fn sctp_sendmsg(
         sd: libc::c_int,
@@ -108,7 +108,7 @@ extern "C" {
         timetolive: u32,
         context: u32,
     ) -> libc::ssize_t;
-    /// `int sctp_recvmsg(...)`: the system header and the installed
+    /// `int sctp_recvmsg(...)`; the system header and the installed
     /// libsctp return `int` (verified: -1 comes back as a 32-bit value),
     /// so declaring `ssize_t` would misread the error return.
     fn sctp_recvmsg(
@@ -123,8 +123,8 @@ extern "C" {
 }
 
 /// A nonblocking SCTP one-to-one (or one-to-many) socket.
-pub(crate) struct SctpSocket {
-    pub(crate) fd: OwnedFd,
+pub struct SctpSocket {
+    pub fd: OwnedFd,
 }
 
 /// Convert a `SocketAddr` into a `sockaddr_storage` + length for the
@@ -235,7 +235,9 @@ impl SctpSocket {
         }
     }
 
-    /// getsockopt wrapper for a `c_int` option.
+    /// getsockopt wrapper for a `c_int` option. Test-only: production
+    /// bind applies options and does not read them back.
+    #[cfg(test)]
     fn get_opt_i32(&self, level: libc::c_int, name: libc::c_int) -> std::io::Result<i32> {
         let mut value: libc::c_int = 0;
         let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -258,7 +260,7 @@ impl SctpSocket {
     }
 
     /// The address this socket is bound to (getsockname).
-    pub(crate) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         // SAFETY: sockaddr_storage is zeroable, large enough for any
         // family, and aligned for sockaddr_in6.
         let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -278,10 +280,10 @@ impl SctpSocket {
     }
 
     /// Create and bind an SCTP socket on `addr`, applying `cfg`.
-    pub(crate) fn bind(addr: SocketAddr, cfg: &SctpConfig) -> std::io::Result<Self> {
+    pub fn bind(addr: SocketAddr, cfg: &SctpConfig) -> std::io::Result<Self> {
         // SAFETY: socket(2) with valid constants; a fresh fd (or -1)
         // comes back and we take ownership immediately. Linux registers
-        // SCTP under the inet family: there is no AF_SCTP in the UAPI.
+        // SCTP under the inet family; there is no AF_SCTP in the UAPI.
         let raw = unsafe {
             libc::socket(
                 libc::AF_INET,
@@ -350,7 +352,7 @@ impl SctpSocket {
     }
 
     /// Send `data` on stream `stream_id` to `dst`.
-    pub(crate) fn send_msg(
+    pub fn send_msg(
         &self,
         data: &[u8],
         stream_id: u16,
@@ -383,7 +385,7 @@ impl SctpSocket {
 
     /// Receive one message; returns the payload length, the sender, and
     /// the stream id. `Err(WouldBlock)` = drained.
-    pub(crate) fn recv_msg(
+    pub fn recv_msg(
         &self,
         buf: &mut [u8],
         out_stream: &mut u16,
@@ -421,7 +423,7 @@ impl SctpSocket {
     }
 
     /// The raw fd.
-    pub(crate) fn as_raw_fd(&self) -> i32 {
+    pub fn as_raw_fd(&self) -> i32 {
         self.fd.as_raw_fd()
     }
 }
@@ -429,7 +431,7 @@ impl SctpSocket {
 /// Errno values meaning "no SCTP support here" (kernel module absent, or
 /// an association refused for lack of support): tests and the SCTP bench
 /// skip on these instead of failing.
-pub(crate) fn unsupported(e: &std::io::Error) -> bool {
+pub fn unsupported(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(
@@ -444,7 +446,7 @@ pub(crate) fn unsupported(e: &std::io::Error) -> bool {
 }
 
 /// recv_msg's "this message was an SCTP notification" sentinel.
-pub(crate) fn is_notification(e: &std::io::Error) -> bool {
+pub fn is_notification(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::Other && e.to_string() == "sctp notification"
 }
 

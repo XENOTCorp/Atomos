@@ -9,7 +9,7 @@ pub fn pin_to_core(core: usize) -> std::io::Result<()> {
 }
 
 /// Coarse monotonic ticks (seconds since first call) for hot-state
-/// activity stamps: no clock syscall per packet (Instant::elapsed reads
+/// activity stamps; no clock syscall per packet (Instant::elapsed reads
 /// a vDSO time). Shared by the epoll and io_uring datapaths.
 pub fn now_ticks() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

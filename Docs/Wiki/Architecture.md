@@ -22,6 +22,6 @@ encode
 
 Pinned workers accept, parse, and write on their own core. Blocking work belongs in the consumer. Do not block the request path.
 
-The H1 engine runs one FDS reactor per pinned worker. It binds FDS TCP listeners with SO_REUSEPORT. Per-connection HTTP state is keyed by FDS connection tokens.
+The H1 engine runs one FDS reactor per pinned worker. It binds FDS TCP listeners with SO_REUSEPORT. Per-connection HTTP state is a slot array indexed by the FDS `ConnectionId`.
 
 HTTP/1.1 keep-alive uses the encoded byte cache. HTTP/2 and HTTP/3 use the semantic `Out` cache with the same epoch.

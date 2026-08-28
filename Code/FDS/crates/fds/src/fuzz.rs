@@ -3,7 +3,7 @@
 //! libFuzzer / cargo-fuzz targets are deliberately not used: the crate
 //! is a BINARY package with no public API (author ruling), so a fuzz
 //! target crate could not reach the crate-private atoms. This harness is
-//! the runnable equivalent: deterministic (fixed seed), allocation-free
+//! the runnable equivalent; deterministic (fixed seed), allocation-free
 //! per iteration, and it runs on stable Rust. It is invoked from the
 //! `fds` binary via `--fuzz <iters>` (arg dispatch wired at the
 //! integration milestone).

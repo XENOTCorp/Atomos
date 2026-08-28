@@ -7,7 +7,7 @@ pub const fn cache_line_size() -> usize {
 }
 
 /// A value aligned to a cache line (64 bytes), so it never shares a line
-/// with another `CachePadded` in an array: the false-sharing antidote.
+/// with another `CachePadded` in an array; the false-sharing antidote.
 #[repr(align(64))]
 pub struct CachePadded<T> {
     value: T,
@@ -63,15 +63,18 @@ pub type PaddedCounter = CachePadded<core::sync::atomic::AtomicU64>;
 /// `#[repr(align(64))]` so they never share a line.
 #[repr(C)]
 pub struct HotCold<Hot, Cold> {
-    /// Hot fields: keep this aligned to a cache line.
-    pub hot: Hot,
-    /// Cold fields: keep this in a separate line from `hot`.
-    pub cold: Cold,
+    /// Hot fields: alone on a cache line.
+    pub hot: CachePadded<Hot>,
+    /// Cold fields: a separate cache line from `hot`.
+    pub cold: CachePadded<Cold>,
 }
 
 impl<Hot, Cold> HotCold<Hot, Cold> {
     pub const fn new(hot: Hot, cold: Cold) -> Self {
-        HotCold { hot, cold }
+        HotCold {
+            hot: CachePadded::new(hot),
+            cold: CachePadded::new(cold),
+        }
     }
 }
 
@@ -106,7 +109,12 @@ mod tests {
     fn hot_cold_does_not_share_line_by_default_layout() {
         // With repr(C), hot comes first; the user is responsible for
         // padding. Assert the struct is at least aligned:
-        assert_eq!(core::mem::align_of::<HotCold<u64, u64>>(), 8);
+        assert_eq!(core::mem::align_of::<HotCold<u64, u64>>(), 64);
+        assert_eq!(core::mem::size_of::<HotCold<u64, u64>>(), 128);
+        let pair = HotCold::new(1u64, 2u64);
+        let hot = &pair.hot as *const _ as usize;
+        let cold = &pair.cold as *const _ as usize;
+        assert!(cold.abs_diff(hot) >= 64);
         assert_align::<CachePadded<u64>>(64);
     }
 }

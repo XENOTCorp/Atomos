@@ -1,5 +1,5 @@
 //! Experimental AF_XDP path (feature `af-xdp`): raw Ethernet sockets
-//! with the XDP umem/ring setup: `socket(AF_XDP, SOCK_RAW, 0)`,
+//! with the XDP umem/ring setup; `socket(AF_XDP, SOCK_RAW, 0)`,
 //! `XDP_UMEM_REG`, `XDP_RX_RING`/`XDP_TX_RING` (mmap'd), `bind()` with
 //! `struct sockaddr_xdp`. EXPERIMENTAL: needs an XDP-attached device at
 //! runtime; the module compiles everywhere, tests skip when no device is
@@ -72,7 +72,7 @@ struct SockaddrXdp {
     sxdp_shared_umem_fd: u32,
 }
 
-/// `struct xdp_umem_reg` from `<linux/if_xdp.h>`: includes
+/// `struct xdp_umem_reg` from `<linux/if_xdp.h>`; includes
 /// `tx_metadata_len`, which this kernel's header declares.
 #[repr(C)]
 struct XdpUmemReg {
@@ -104,7 +104,7 @@ struct XdpMmapOffsets {
     cr: XdpRingOffset,
 }
 
-/// `struct xdp_desc` from `<linux/if_xdp.h>`: an RX/TX ring entry.
+/// `struct xdp_desc` from `<linux/if_xdp.h>`; an RX/TX ring entry.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct XdpDesc {
@@ -117,7 +117,7 @@ struct XdpDesc {
 ///
 /// EXPERIMENTAL, not production-ready: single consumer/producer per ring,
 /// one in-flight TX frame on a fixed umem slot, no wakeup handling.
-pub(crate) struct XskSocket {
+pub struct XskSocket {
     fd: i32,
     /// Anonymous umem mapping (16 MiB); frame `i` is at `umem + i * frame_size`.
     umem: *mut u8,
@@ -257,7 +257,7 @@ impl XskSocket {
     }
 
     /// Open an AF_XDP socket for `ifindex` on queue `queue_id`.
-    pub(crate) fn open(ifindex: i32, queue_id: u32) -> io::Result<Self> {
+    pub fn open(ifindex: i32, queue_id: u32) -> io::Result<Self> {
         let frame_size = DEFAULT_FRAME_SIZE;
         let num_frames = DEFAULT_NUM_FRAMES;
         let umem_len = (num_frames as usize) * (frame_size as usize);
@@ -385,7 +385,7 @@ impl XskSocket {
                 ring_map_len(offsets.cr.desc, ring_size, std::mem::size_of::<u64>()),
             )?;
 
-            // Bind via bind(2) with struct sockaddr_xdp: the kernel has
+            // Bind via bind(2) with struct sockaddr_xdp; the kernel has
             // no XDP_BIND setsockopt; its xsk_bind() runs on the syscall.
             let sxdp = SockaddrXdp {
                 sxdp_family: libc::AF_XDP as u16,
@@ -476,7 +476,7 @@ impl XskSocket {
     /// Receive one frame into `out`. Returns `Some(len)` with the frame
     /// copied into `out[..len]`, or `None` when the ring is empty (or the
     /// frame did not fit `out` and was dropped back to the fill ring).
-    pub(crate) fn recv_frame(&mut self, out: &mut [u8]) -> Option<usize> {
+    pub fn recv_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         let mask = self.ring_size - 1;
 
         // SAFETY: rx_producer() is the RX-ring producer word (written by
@@ -532,7 +532,7 @@ impl XskSocket {
 
     /// Send one frame; `false` = tx ring full (or `data` larger than one
     /// umem frame).
-    pub(crate) fn send_frame(&mut self, data: &[u8]) -> bool {
+    pub fn send_frame(&mut self, data: &[u8]) -> bool {
         if data.len() > self.frame_size as usize {
             return false;
         }
@@ -594,10 +594,10 @@ impl XskSocket {
     /// Insert this socket into an XSKMAP so an attached XDP program can
     /// steer frames into the socket's RX ring. `map_path` is a pinned
     /// bpffs map (e.g. `/sys/fs/bpf/xskmap`); the socket is registered
-    /// at `queue`. The map fd comes from `BPF_OBJ_GET`: plain `open()`
+    /// at `queue`. The map fd comes from `BPF_OBJ_GET`; plain `open()`
     /// on a pinned XSKMAP returns EIO on this kernel (verified; array
     /// maps open fine, XSKMAP does not).
-    pub(crate) fn register_in_map(&self, map_path: &str, queue: u32) -> io::Result<()> {
+    pub fn register_in_map(&self, map_path: &str, queue: u32) -> io::Result<()> {
         const BPF_OBJ_GET: libc::c_int = 7;
         const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
         let path = std::ffi::CString::new(map_path)
@@ -627,8 +627,8 @@ impl XskSocket {
         if map_fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        // `union bpf_attr` for BPF_MAP_UPDATE_ELEM: map_fd/key/value/flags
-        //: key/value are POINTERS to the actual u32s (repr(C) aligns the
+        // `union bpf_attr` for BPF_MAP_UPDATE_ELEM: map_fd/key/value/flags.
+        // key/value are POINTERS to the actual u32s (repr(C) aligns the
         // u64s after the u32 map_fd, matching the kernel's bpf_attr).
         #[repr(C)]
         struct BpfAttrUpdateElem {
@@ -699,11 +699,11 @@ impl Drop for XskSocket {
 
 /// The outcome of processing one received frame.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum FrameAction {
+pub enum FrameAction {
     /// Validated and rewritten for echo (MACs swapped, TTL decremented,
-    /// IP checksum recomputed): transmit it.
+    /// IP checksum recomputed); transmit it.
     Echo,
-    /// Not IPv4/UDP, malformed, bad checksum, or TTL expired: drop it.
+    /// Not IPv4/UDP, malformed, bad checksum, or TTL expired; drop it.
     Drop,
 }
 
@@ -711,10 +711,10 @@ pub(crate) enum FrameAction {
 /// (EtherType IPv4, IPv4 + UDP headers, IP + UDP checksums) and rewrite
 /// (swap MACs, decrement TTL, recompute the IP checksum; the UDP
 /// checksum is untouched because the IP addresses and payload do not
-/// change). A pure function over the frame bytes: the unit-tested core
+/// change). A pure function over the frame bytes; the unit-tested core
 /// of the AF_XDP datapath, exercised here with synthetic frames (the
 /// ring mechanics themselves need an XDP-capable device).
-pub(crate) fn process_frame(frame: &mut [u8]) -> FrameAction {
+pub fn process_frame(frame: &mut [u8]) -> FrameAction {
     // Ethernet II (14) + IPv4 (>= 20) + UDP (8) minimum.
     if frame.len() < 14 + 20 + 8 {
         return FrameAction::Drop;
@@ -837,7 +837,7 @@ mod tests {
         }
     }
 
-    /// Full umem/ring smoke test: runs only when a device is available
+    /// Full umem/ring smoke test; runs only when a device is available
     /// (skips silently otherwise).
     #[test]
     fn full_setup_skips() {

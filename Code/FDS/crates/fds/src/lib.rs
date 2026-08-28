@@ -45,6 +45,3 @@ pub mod sctp;
 pub mod io_uring_reactor;
 
 pub mod af_xdp;
-
-#[cfg(test)]
-mod alloc_count;

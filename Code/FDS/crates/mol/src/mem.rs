@@ -47,7 +47,7 @@ pub fn huge_page(len: usize) -> Option<HugePageGuard> {
 }
 
 impl HugePageGuard {
-    /// The mapped region as a byte slice (uninitialized contents: zero
+    /// The mapped region as a byte slice (uninitialized contents; zero
     /// explicitly before reading, per the no-uninitialized-reads policy).
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: the region is valid for `len` bytes for the guard's
@@ -92,7 +92,7 @@ unsafe impl Send for HugePageGuard {}
 
 /// Initialize a `MaybeUninit` slot with zeroed bytes and assume init.
 /// Use only after every byte of the value is initialized (zeroed values
-/// are valid only for types where the all-zero bit pattern is valid : 
+/// are valid only for types where the all-zero bit pattern is valid,
 /// e.g. integers, fixed arrays of integers).
 #[inline]
 pub fn zeroed<T: Copy>(out: &mut core::mem::MaybeUninit<T>) {

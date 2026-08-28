@@ -1,13 +1,13 @@
 # Benchmarks
 
-Measured comparisons of the Atomos HTTP kernel against other HTTP servers. Every row of a table uses the same machine, the same load generator, the same payload files, the same connection counts, and the same duration.
+Measured on one machine, one load generator, one payload set. Each server is the only listener on the box for its rows. Seastar `--smp 4` busy-polls idle cores; it is killed before the next server starts.
 
 ## Method
 
-- Machine: Intel Core i5-5200U (2 physical cores, 4 logical), kernel 7.2.0_1 (Void Linux), loopback only. This is the full hardware statement.
-- Load generators: `wrk -t4 -c100 -d5s` for HTTP/1.1, `h2load` for HTTP/2, `curl` for latency percentiles, and the in-repo `bench_h23` client for HTTP/3.
-- Payload files: `index.html` (11 bytes), `file64k.bin` (64 KiB), and `file1m.bin` (1 MiB). Identical for every server.
-- Servers run out of the box except where a row states otherwise: nginx uses `open_file_cache` (tuned static path), h2o uses `num-threads: 4`, Seastar uses `--smp 4`, and the Rust servers use their default runtimes.
+- Machine: Intel Core i5-5200U (2 physical cores, 4 logical), kernel 7.2.0_1 (Void Linux), loopback only.
+- Load generators: `wrk -t4 -c100 -d5s` for HTTP/1.1, `h2load` for HTTP/2, `curl` for latency percentiles, in-repo `bench_h23` for HTTP/3.
+- Payloads: `index.html` (11 bytes), `file64k.bin` (64 KiB), `file1m.bin` (1 MiB). Same files for every server.
+- Servers: nginx `open_file_cache`, h2o `num-threads: 4`, Seastar `--smp 4`, Rust servers on their default runtimes. Atomos: 4 pinned FDS epoll workers, wire cache, host overlay `cache_bytes` = L3.
 - Percentiles: p10, p50, p90, p95, p99, p999.
 
 ## HTTP/1.1 throughput
@@ -16,65 +16,58 @@ Measured comparisons of the Atomos HTTP kernel against other HTTP servers. Every
 
 | Server | Cached page | Rank | % vs Atomos | 64 KiB file |
 | --- | --- | --- | --- | --- |
-| Atomos H1 (FDS epoll) | 100,328 req/s | 1 | 0% (baseline) | 27,848 req/s (1.70 GB/s) |
-| h2o 2.2.6 | 86,755 req/s | 2 | -13.5% | 26,791 req/s (1.64 GB/s) |
-| nginx 1.30.4 (open_file_cache) | 70,379 req/s | 3 | -29.9% | 33,805 req/s (2.07 GB/s) |
-| Hyper 1 (tokio) | 41,024 req/s | 4 | -59.1% | 18,688 req/s (1.14 GB/s) |
-| Caddy 2.11.4 | 18,513 req/s | 5 | -81.5% | 15,194 req/s (0.93 GB/s) |
-| Seastar httpd | 10,334 req/s | 6 | -89.7% | 2,412 req/s (151.5 MB/s) |
-| axum 0.8 | 2,533 req/s | 7 | -97.5% | 9,751 req/s (611.2 MB/s) |
-| actix-web 4 | 2,514 req/s | 8 | -97.5% | 15,633 req/s (959.3 MB/s) |
+| Atomos H1 (FDS epoll) | 86,032 req/s | 1 | 0% (baseline) | 26,778 req/s (1.64 GB/s) |
+| h2o 2.2.6 | 84,538 req/s | 2 | -1.7% | 26,768 req/s (1.64 GB/s) |
+| nginx 1.30.4 (open_file_cache) | 65,522 req/s | 3 | -23.8% | 33,875 req/s (2.08 GB/s) |
+| Hyper 1 (tokio) | 41,923 req/s | 4 | -51.3% | 18,891 req/s (1.15 GB/s) |
+| Caddy 2.11.4 | 18,642 req/s | 5 | -78.3% | 15,200 req/s (0.93 GB/s) |
+| Seastar httpd | 6,628 req/s | 6 | -92.3% | 2,289 req/s (143.7 MB/s) |
+| axum 0.8 | 2,529 req/s | 7 | -97.1% | 9,752 req/s (611.2 MB/s) |
+| actix-web 4 | 2,507 req/s | 8 | -97.1% | 15,348 req/s (0.94 GB/s) |
 
-64 KiB file ranking, ordered by throughput:
+64 KiB file ranking:
 
 | Server | 64 KiB file | Rank | % vs Atomos |
 | --- | --- | --- | --- |
-| nginx 1.30.4 (open_file_cache) | 33,805 req/s (2.07 GB/s) | 1 | +21.4% |
-| Atomos H1 (FDS epoll) | 27,848 req/s (1.70 GB/s) | 2 | 0% (baseline) |
-| h2o 2.2.6 | 26,791 req/s (1.64 GB/s) | 3 | -3.8% |
-| Hyper 1 (tokio) | 18,688 req/s (1.14 GB/s) | 4 | -32.9% |
-| actix-web 4 | 15,633 req/s (959.3 MB/s) | 5 | -43.9% |
-| Caddy 2.11.4 | 15,194 req/s (0.93 GB/s) | 6 | -45.4% |
-| axum 0.8 | 9,751 req/s (611.2 MB/s) | 7 | -65.0% |
-| Seastar httpd | 2,412 req/s (151.5 MB/s) | 8 | -91.3% |
+| nginx 1.30.4 (open_file_cache) | 33,875 req/s (2.08 GB/s) | 1 | +26.5% |
+| Atomos H1 (FDS epoll) | 26,778 req/s (1.64 GB/s) | 2 | 0% (baseline) |
+| h2o 2.2.6 | 26,768 req/s (1.64 GB/s) | 3 | 0.0% |
+| Hyper 1 (tokio) | 18,891 req/s (1.15 GB/s) | 4 | -29.5% |
+| actix-web 4 | 15,348 req/s (0.94 GB/s) | 5 | -42.7% |
+| Caddy 2.11.4 | 15,200 req/s (0.93 GB/s) | 6 | -43.2% |
+| axum 0.8 | 9,752 req/s (611.2 MB/s) | 7 | -63.6% |
+| Seastar httpd | 2,289 req/s (143.7 MB/s) | 8 | -91.5% |
 
-## 1 MiB file (saturated)
+## 1 MiB file
 
-`wrk -t8 -c512 -d10s -T 30s`, keep-alive, 1 MiB file. The concurrency was swept from 100 to 2,048 connections on nginx before the matrix. The loopback byte path peaks at 512 connections on this box (2,048 degrades to 2.6 GB/s). At 1 MiB the per-request overhead amortizes, so byte rates exceed the 64 KiB rows for every server.
+`wrk -t8 -c512 -d10s -T 30s`, keep-alive. Concurrency swept on nginx from 100 to 2,048; loopback peaks at 512 on this box.
 
 | Server | 1 MiB file | Rank | % vs Atomos |
 | --- | --- | --- | --- |
-| nginx 1.30.4 (open_file_cache) | 3,538 req/s (3.46 GB/s) | 1 | +2.1% |
-| Atomos H1 (FDS epoll) | 3,466 req/s (3.39 GB/s) | 2 | 0% (baseline) |
-| Caddy 2.11.4 | 3,092 req/s (3.02 GB/s) | 3 | -10.8% |
-| h2o 2.2.6 | 2,406 req/s (2.35 GB/s) | 4 | -30.6% |
-| Hyper 1 (tokio) | 1,841 req/s (1.80 GB/s) | 5 | -46.9% |
-| actix-web 4 | 1,257 req/s (1.25 GB/s) | 6 | -63.7% |
-| axum 0.8 | 1,247 req/s (1.24 GB/s) | 7 | -64.0% |
-| Seastar httpd | 156 req/s (175.7 MB/s) | 8 | -95.5% |
+| nginx 1.30.4 (open_file_cache) | 3,571 req/s (3.49 GB/s) | 1 | +9.0% |
+| Atomos H1 (FDS epoll) | 3,277 req/s (3.20 GB/s) | 2 | 0% (baseline) |
+| Caddy 2.11.4 | 3,155 req/s (3.08 GB/s) | 3 | -3.7% |
+| h2o 2.2.6 | 2,412 req/s (2.36 GB/s) | 4 | -26.4% |
+| Hyper 1 (tokio) | 1,858 req/s (1.81 GB/s) | 5 | -43.3% |
+| actix-web 4 | 1,241 req/s (1.23 GB/s) | 6 | -62.1% |
+| axum 0.8 | 1,232 req/s (1.22 GB/s) | 7 | -62.4% |
+| Seastar httpd | 189 req/s (209.8 MB/s) | 8 | -94.2% |
 
-Notes:
-
-- The cached page for Atomos, h2o, and nginx is an in-memory response path. Atomos and h2o use a wire cache. nginx uses `open_file_cache` on its static path. axum and Hyper read the file per request.
-- On the 64 KiB file, nginx sendfile leads. Atomos and h2o are at parity on the byte path.
-- Seastar httpd demo serves files through its directory handler (`/file/<name>`, mapped to the filesystem root) without a response cache.
-- Atomos leads the cached page. Relative to Atomos: h2o -13.5%, nginx -29.9%. On the 64 KiB file nginx is +21.4% and h2o -3.8%. On the 1 MiB file nginx is +2.1%.
+Atomos, h2o, and nginx serve the cached page from an in-memory path (wire cache or `open_file_cache`). axum and Hyper read the file per request. On 64 KiB and 1 MiB, nginx sendfile leads; Atomos and h2o match on the 64 KiB byte path. Seastar httpd serves through its directory handler (`/file/...`) with no response cache.
 
 ## HTTP/1.1 latency percentiles
 
-Fresh connection per request, `curl` total time, 200 samples:
+Fresh connection per request, `curl` total time, 200 samples, microseconds. Ranked by p50.
 
-| Server | p10 | p50 | p90 | p99 | p999 | mean | Rank (p50) | % vs Atomos (p50) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Atomos H1 | 259 | 291 | 337 | 1484 | 2468 | 321.5 | 1 | 0% (baseline) |
-| nginx | 292 | 323 | 366 | 601 | 677 | 330.6 | 2 | +11.0% |
-| h2o | 329 | 343 | 385 | 913 | 1091 | 362.1 | 3 | +17.9% |
-| Hyper | 355 | 393 | 457 | 1004 | 1144 | 411.6 | 4 | +35.1% |
-| axum | 444 | 498 | 593 | 1393 | 2011 | 523.9 | 5 | +71.1% |
-| Caddy | 515 | 549 | 600 | 1471 | 1778 | 568.6 | 6 | +88.7% |
-| Seastar | 584 | 669 | 1302 | 2750 | 2772 | 835.5 | 7 | +129.9% |
-
-All values are microseconds. Ranked by p50 (lower is better).
+| Server | p10 | p50 | p90 | p95 | p99 | p999 | mean | Rank (p50) | % vs Atomos (p50) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Atomos H1 | 259 | 292 | 355 | 451 | 1277 | 1519 | 322.8 | 1 | 0% (baseline) |
+| nginx | 288 | 319 | 360 | 376 | 875 | 1466 | 326.6 | 2 | +9.2% |
+| h2o | 329 | 341 | 380 | 445 | 879 | 990 | 358.6 | 3 | +16.8% |
+| Hyper | 354 | 397 | 457 | 495 | 1193 | 1201 | 414.2 | 4 | +36.0% |
+| axum | 477 | 533 | 643 | 747 | 1754 | 2920 | 579.3 | 5 | +82.5% |
+| Caddy | 530 | 565 | 629 | 650 | 1500 | 2051 | 586.8 | 6 | +93.5% |
+| Seastar | 602 | 641 | 885 | 1286 | 27638 | 74259 | 1244.0 | 7 | +119.5% |
 
 ## HTTP/2
 
@@ -82,38 +75,26 @@ All values are microseconds. Ranked by p50 (lower is better).
 
 | Server | Multiplexed | Sequential | Rank | % vs Atomos (mux) |
 | --- | --- | --- | --- | --- |
-| h2o 2.2.6 | 254,079 req/s | 18,332 req/s | 1 | +52.4% |
-| Atomos (atomos-proto, h2c) | 166,761 req/s | 16,364 req/s | 2 | 0% (baseline) |
-| nghttpd (nghttp2) | not comparable | not comparable | n/a | n/a |
-
-nghttpd returned 404 for `/` (no index handling) in every request, so its rows are excluded. Ranked by multiplexed throughput. On the sequential row h2o leads Atomos by 12.0%. The Atomos H2 wire cost per request is 149 B first and 12 B steady (HPACK static and dynamic table hits).
+| h2o 2.2.6 | 233,905 req/s | 17,015 req/s | 1 | +93.4% |
+| Atomos (atomos-proto, h2c) | 120,929 req/s | 15,970 req/s | 2 | 0% (baseline) |
 
 ## HTTP/3
 
-`atomos-proto` with the QUIC path, 1000 requests (in-repo `bench_h23` client):
+`atomos-proto` QUIC path, 1000 requests, in-repo `bench_h23`:
 
 | Mode | Throughput | p50 | p99 |
 | --- | --- | --- | --- |
-| Sequential | 7,225 req/s | 123.4 µs | 427.0 µs |
-| Multiplexed (64 streams) | 38,071 req/s | - | - |
+| Sequential | 6,936 req/s | 122.0 µs | 491.6 µs |
+| Multiplexed (64 streams) | 32,179 req/s | - | - |
 
-Multiplexing gain: 38,071 / 7,225 = 5.3x over the sequential row.
-
-A head-to-head HTTP/3 comparison against nghttpx or quiche was not measurable on this platform. The `h2load` QUIC client and the available servers are not interoperable on this machine. The HTTP/3 numbers above are the server's own measured behavior.
+Multiplexing gain: 32,179 / 6,936 = 4.6x.
 
 ## Resource counters
 
-`perf stat` on the Atomos H1 server under the `wrk` load, 4 seconds: IPC 0.54, branch miss rate 1.20%, dTLB miss rate 0.19%, L1-dcache misses 266.6 M, page faults 1,240, context switches about 6,100 per second, zero CPU migrations. Peak heap at startup (massif): 2.73 MB. CPU split under load (mpstat): %usr 23.6, %sys 56.7, %soft 19.1.
+`perf stat` on the Atomos H1 process under `wrk`, 4 seconds: IPC 0.57, branch miss rate 1.29%, dTLB miss rate 0.16%, L1-dcache misses 255.3 M, page faults 2,019, context switches about 7,550 per second, zero CPU migrations. Peak heap at startup (massif): 2.91 MB. CPU split under load (mpstat): %usr 21.7, %sys 57.3, %soft 19.5.
 
-Time to first byte, fresh connection, 100 samples: p50 233 µs, p99 2404 µs.
-
-## Stacks not run on this platform
-
-- msquic: requires a QUIC build environment and a certificate store.
-- Netty: the netty-all artifact is not retrievable through this network. The JDK is present.
-- quiche: requires BoringSSL, which needs NASM. NASM is not installed.
-- DPDK and F-Stack: require a DPDK-capable NIC. The only live link here is Wi-Fi.
+Time to first byte, fresh connection, 100 samples: p50 259 µs, p99 908 µs.
 
 ## Transport
 
-The Atomos H1 engine is the FDS epoll transport with an HTTP state machine on top. Transport measurements (echo throughput, latency percentiles, SCTP, reactor strategies) live in the FDS project, not in this tree.
+The Atomos H1 engine is the FDS epoll transport with an HTTP state machine on top. Connection state is a slot array indexed by FDS `ConnectionId`. Transport measurements (echo throughput, latency percentiles, SCTP, reactor strategies) live in the FDS project.

@@ -49,6 +49,8 @@ pub struct HotState {
     pub last_activity: u64,
     /// Bytes in flight (send window / receive pressure).
     pub in_flight: u32,
+    /// Transport fd. Touched on every I/O, so it lives on the hot line.
+    pub fd: i32,
 }
 
 /// COLD connection fields: touched rarely (setup, teardown, peer info).
@@ -66,8 +68,6 @@ pub struct ColdState {
 pub struct Connection {
     pub hot: CachePadded<HotState>,
     pub cold: CachePadded<ColdState>,
-    /// The fd for this connection (transport-owned; -1 when unbound).
-    pub fd: i32,
 }
 
 /// Connection table capacity per worker (preallocated slots). Shared by
@@ -81,13 +81,13 @@ impl Connection {
                 seq: 0,
                 last_activity: established_at,
                 in_flight: 0,
+                fd: -1,
             }),
             cold: CachePadded::new(ColdState {
                 peer,
                 established_at,
                 flags: 0,
             }),
-            fd: -1,
         }
     }
 }
@@ -139,7 +139,7 @@ impl<const CAP: usize> ConnTable<CAP> {
         self.pool.in_use()
     }
 
-    /// Release a slot back to the free list (the caller must own it : 
+    /// Release a slot back to the free list (the caller must own it,
     /// e.g. after closing a connection). The slot's data stays in place
     /// for the next owner.
     pub fn release_slot(&self, slot: usize) {
@@ -147,7 +147,7 @@ impl<const CAP: usize> ConnTable<CAP> {
     }
 
     /// Mutable access to an owned slot's connection (the caller must own
-    /// the slot: e.g. the reactor holds it for a live connection).
+    /// the slot; e.g. the reactor holds it for a live connection).
     pub fn conn_mut(&self, slot: usize) -> &mut Connection {
         self.pool.get_mut(slot)
     }
@@ -210,6 +210,7 @@ mod tests {
 
     const_assert_eq!(core::mem::align_of::<HotState>(), 64);
     const_assert_eq!(core::mem::size_of::<HotState>(), 64);
+    const_assert!(core::mem::offset_of!(HotState, fd) < 64);
     const_assert_eq!(core::mem::align_of::<ColdState>(), 64);
     const_assert_eq!(core::mem::size_of::<ColdState>(), 64);
     const_assert_eq!(core::mem::align_of::<CachePadded<HotState>>(), 64);

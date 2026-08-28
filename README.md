@@ -8,7 +8,7 @@ Requirements:
 - Linux
 - Rust 1.97.1 or later
 
-Build and test from `Code/`. FDS crates are already vendored in `Code/FDS`.
+Build and test from `Code/`. FDS crates are vendored in `Code/FDS`.
 
 ```
 cd Code

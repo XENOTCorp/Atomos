@@ -1,16 +1,14 @@
 # Getting Started
 
-This page is the first-hour path. Work in `Code/`. FDS crates are already in `Code/FDS`. You do not clone FDS to build Atomos.
+Work in `Code/`. FDS crates are in `Code/FDS`.
 
 ## 1. Install Rust
 
-Install Rust 1.97.1 or later on Linux.
+Rust 1.97.1 or later on Linux.
 
 ```
 rustc --version
 ```
-
-The compiler version must be 1.97.1 or later.
 
 ## 2. Open a shell in Code/
 
@@ -18,15 +16,13 @@ The compiler version must be 1.97.1 or later.
 cd Code
 ```
 
-Cargo.toml lives here. Do not run Cargo from the repository root.
+Cargo.toml lives here. Run Cargo from `Code/`, not the repository root.
 
 ## 3. Run tests
 
 ```
 cargo test
 ```
-
-The command must finish with no failures.
 
 ## 4. Run the login server example
 

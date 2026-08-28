@@ -1,12 +1,20 @@
-//! Lock-free rings (standard \[R\]).
+//! Lock-free FIFO rings (standard \[R\]).
 //!
-//! Both rings are power-of-two capacity with bitmask indexing. The SPSC
-//! ring keeps in-flight ≤ CAP − 1 so the masked full/empty checks are
-//! unambiguous; the MPMC ring (Vyukov) holds up to CAP items, with
-//! sequence-number epochs disambiguating full/empty. `SpscRing` is single
-//! producer, single consumer; `MpmcRing` allows arbitrary producers and
-//! consumers, lock-free.
+//! Both rings are power-of-two capacity with bitmask indexing. They
+//! realize FIFO content: `push` writes at `w`, `pop` reads at `r`.
+//! On a nonempty buffer, `push; pop` returns the oldest stored element,
+//! not the element just pushed, so they are not models of the stack
+//! theory (`push; pop = id`).
+//!
+//! The SPSC ring keeps in-flight `≤ CAP − 1` so masked full/empty
+//! checks are unambiguous (ring-capacity invariant). The MPMC ring
+//! (Vyukov) holds up to `CAP` items: sequence-number epochs
+//! disambiguate full/empty, which is a different protocol from the
+//! bitmask-only occupancy bound. `SpscRing` is single producer, single
+//! consumer; `MpmcRing` allows arbitrary producers and consumers,
+//! lock-free.
 
+use crate::layout::CachePadded;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -23,13 +31,18 @@ const _: () = assert!(core::mem::size_of::<usize>() >= 4);
 /// written only by the producer (after a `Release` head store) and read
 /// only by the consumer (after an `Acquire` head load); Release/Acquire
 /// ordering pairs each write with the read that observes it.
+#[repr(C)]
 pub struct SpscRing<T, const CAP: usize> {
     buffer: UnsafeCell<[MaybeUninit<T>; CAP]>,
-    head: AtomicUsize, // next slot to write (producer-owned)
-    tail: AtomicUsize, // next slot to read (consumer-owned)
+    /// Producer-owned write index. Own cache line so the consumer's
+    /// tail load does not bounce this line.
+    head: CachePadded<AtomicUsize>,
+    /// Consumer-owned read index. Own cache line so the producer's
+    /// head load does not bounce this line.
+    tail: CachePadded<AtomicUsize>,
 }
 
-// SAFETY: see struct docs: the slot discipline makes cross-thread access
+// SAFETY: see struct docs; the slot discipline makes cross-thread access
 // sound for `T: Send`.
 unsafe impl<T: Send, const CAP: usize> Sync for SpscRing<T, CAP> {}
 
@@ -43,12 +56,15 @@ impl<T, const CAP: usize> SpscRing<T, CAP> {
 
     /// A new empty ring. `CAP` must be a power of two.
     pub const fn new() -> Self {
-        assert!(CAP.is_power_of_two(), "SpscRing: CAP must be a power of two");
+        assert!(
+            CAP.is_power_of_two(),
+            "SpscRing: CAP must be a power of two"
+        );
         SpscRing {
             // SAFETY: MaybeUninit array, no reads before writes.
             buffer: UnsafeCell::new(unsafe { MaybeUninit::uninit().assume_init() }),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            head: CachePadded::new(AtomicUsize::new(0)),
+            tail: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -125,10 +141,14 @@ impl<T, const CAP: usize> Drop for SpscRing<T, CAP> {
 /// Each cell carries a sequence number: enqueue waits for `seq == head`,
 /// dequeue waits for `seq == tail + 1`; the difference with `head`/`tail`
 /// distinguishes empty/full unambiguously.
+#[repr(C)]
 pub struct MpmcRing<T, const CAP: usize> {
     cells: UnsafeCell<[Cell<T>; CAP]>,
-    head: AtomicUsize, // next enqueue slot
-    tail: AtomicUsize, // next dequeue slot
+    /// Enqueue index. Own cache line: producers and consumers do not
+    /// share this line with `tail`.
+    head: CachePadded<AtomicUsize>,
+    /// Dequeue index. Own cache line.
+    tail: CachePadded<AtomicUsize>,
 }
 
 struct Cell<T> {
@@ -149,7 +169,10 @@ impl<T, const CAP: usize> MpmcRing<T, CAP> {
 
     /// A new empty ring. `CAP` must be a power of two.
     pub fn new() -> Self {
-        assert!(CAP.is_power_of_two(), "MpmcRing: CAP must be a power of two");
+        assert!(
+            CAP.is_power_of_two(),
+            "MpmcRing: CAP must be a power of two"
+        );
         // Build the cell array through MaybeUninit (the cells hold
         // uninitialized payloads until a push writes them; sequence
         // numbers are set here before any data read can observe them).
@@ -170,8 +193,8 @@ impl<T, const CAP: usize> MpmcRing<T, CAP> {
         let cells = unsafe { cells.assume_init() };
         MpmcRing {
             cells: UnsafeCell::new(cells),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            head: CachePadded::new(AtomicUsize::new(0)),
+            tail: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -193,8 +216,12 @@ impl<T, const CAP: usize> MpmcRing<T, CAP> {
             let diff = seq.wrapping_sub(head) as isize;
             if diff == 0 {
                 // Slot available: claim it.
-                match self.head.compare_exchange_weak(head, head.wrapping_add(1), Ordering::Relaxed, Ordering::Relaxed)
-                {
+                match self.head.compare_exchange_weak(
+                    head,
+                    head.wrapping_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => {
                         // SAFETY: we own this slot now; no reader can
                         // observe it until the Release seq store.
@@ -226,10 +253,12 @@ impl<T, const CAP: usize> MpmcRing<T, CAP> {
             let seq = cell.seq.load(Ordering::Acquire);
             let diff = seq.wrapping_sub(tail.wrapping_add(1)) as isize;
             if diff == 0 {
-                match self
-                    .tail
-                    .compare_exchange_weak(tail, tail.wrapping_add(1), Ordering::Relaxed, Ordering::Relaxed)
-                {
+                match self.tail.compare_exchange_weak(
+                    tail,
+                    tail.wrapping_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => {
                         // SAFETY: the slot was written and published by an
                         // enqueuer observed via the Acquire seq load.
@@ -282,6 +311,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spsc_head_and_tail_occupy_distinct_cache_lines() {
+        let h = core::mem::offset_of!(SpscRing<u64, 8>, head);
+        let t = core::mem::offset_of!(SpscRing<u64, 8>, tail);
+        assert!(
+            h.abs_diff(t) >= 64,
+            "SPSC head and tail share a cache line: head={h} tail={t}"
+        );
+    }
+
+    #[test]
+    fn mpmc_head_and_tail_occupy_distinct_cache_lines() {
+        let h = core::mem::offset_of!(MpmcRing<u64, 8>, head);
+        let t = core::mem::offset_of!(MpmcRing<u64, 8>, tail);
+        assert!(
+            h.abs_diff(t) >= 64,
+            "MPMC head and tail share a cache line: head={h} tail={t}"
+        );
+    }
+
+    #[test]
     fn spsc_roundtrip_and_invariant() {
         let ring = SpscRing::<u32, 8>::new();
         for i in 0..7 {
@@ -311,7 +360,7 @@ mod tests {
 
     /// Threaded stress tests busy-wait by nature, so the default suite
     /// skips them. Run explicitly (~2 s in debug):
-    /// `cargo test -p mol-core -- --ignored --test-threads=1`.
+    /// `cargo test -p mol -- --ignored --test-threads=1`.
     ///
     /// The spin loops use a pause-instruction backoff with a periodic
     /// scheduler yield: cheaper than a `sched_yield` syscall per iteration
@@ -392,7 +441,7 @@ mod tests {
         let ring = Arc::new(MpmcRing::<u32, 1024>::new());
         // Shared count of items still to be consumed: consumers exit when
         // it reaches zero (a per-consumer `got == TOTAL` target can never
-        // be met once the items are split between consumers: livelock).
+        // be met once the items are split between consumers; livelock).
         let remaining = Arc::new(AtomicUsize::new(TOTAL));
         let mut producers = Vec::new();
         for p in 0..P {

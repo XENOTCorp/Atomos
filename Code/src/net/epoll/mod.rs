@@ -7,14 +7,16 @@
 //! tokens (a closed fd's number can never alias a live connection).
 //! No tokio tasks, no spawn-per-conn. H2/H3 are not handled here.
 //!
-//! The receive loop allocates nothing after warm-up: HTTP `Conn` state
-//! is a slot array indexed by the packed [`ConnectionId`] (not a
-//! `HashMap`), the request buffer is pre-sized at accept to
-//! `max_header + max_body` and never grown, consumed bytes are compacted
-//! once per 64 KiB instead of a `drain` memmove per request, and the
-//! response encoder writes into a reused per-worker scratch. Outgoing
-//! bytes copy into a fixed `out` buffer or `write_all`; the hot path
-//! does not realloc (ALLOC-01).
+//! The receive loop allocates nothing after warm-up on the cached GET
+//! path: HTTP `Conn` state is a slot array indexed by the packed
+//! [`ConnectionId`] (not a `HashMap`), the request buffer is reserved
+//! to 4 KiB at accept (a large POST may reserve once toward
+//! `max_header+max_body`), consumed bytes are compacted once per
+//! 64 KiB, and the encoder writes into a reused per-worker scratch.
+//! Small responses write from the wire cache; leftovers park in a
+//! 2 KiB `out` buffer. Byte-path bodies park in `out` up to
+//! [`SF_MIN`]+headers. Bigger bodies go through `sendfile`. The hot
+//! path does not realloc (ALLOC-01).
 
 use std::io;
 use std::net::SocketAddr;
@@ -36,6 +38,7 @@ use crate::io::{Body, HeaderView, In, OutBody};
 use crate::parse::{looks_like_json, parse_request, scan_json, ParseStatus};
 use crate::pin_cpu;
 use crate::route::Router;
+use crate::static_mod::SF_MIN;
 
 mod conn;
 mod write;
@@ -51,9 +54,19 @@ const TOKEN_LISTENER: u64 = u64::MAX;
 /// been read (one memmove per 64 KiB instead of per request).
 const COMPACT_THRESHOLD: usize = 64 * 1024;
 
-/// Encoded-header scratch and cache-hit copy cap. Sized on the worker
-/// (control path). The hot path never grows these.
+/// Accept-time request buffer. Cached GET/HEAD stay here. A large POST
+/// may reserve once toward `max_header+max_body` (ALLOC-04).
+pub const IN_CAP: usize = 4096;
+
+/// Encoded-header scratch and leftover-park cap. Cached GET responses
+/// fit here. Byte-path file bodies may park up to [`out_max`].
 pub const OUT_CAP: usize = 2048;
+
+/// Max parked outbound bytes: one byte-path response (sendfile starts
+/// at [`SF_MIN`]) plus header scratch.
+pub const fn out_max() -> usize {
+    SF_MIN as usize + OUT_CAP
+}
 
 /// Slot index for a live HTTP connection token. `None` for the listener
 /// or an out-of-range id.
@@ -85,6 +98,20 @@ pub fn append_in_cap(buf: &mut Vec<u8>, src: &[u8]) -> bool {
 /// Copy `src` onto `out` only when it fits in existing capacity.
 pub fn copy_into_out(out: &mut Vec<u8>, src: &[u8]) -> bool {
     append_in_cap(out, src)
+}
+
+/// Append toward a declared max. Reserves at most once when the body
+/// exceeds the accept-time header reservation. Never grows past `max`.
+fn append_bounded(buf: &mut Vec<u8>, src: &[u8], max: usize) -> bool {
+    let need = buf.len().saturating_add(src.len());
+    if need > max {
+        return false;
+    }
+    if src.len() > buf.capacity().saturating_sub(buf.len()) {
+        buf.reserve(src.len());
+    }
+    buf.extend_from_slice(src);
+    true
 }
 
 pub fn run(router: Arc<Router>, ctx: Arc<AtomCtx>) -> Result<(), ServeError> {
@@ -187,7 +214,7 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
         for ev in evbuf.iter().take(m) {
             let token = ev.token;
             if token == TOKEN_LISTENER {
-                accept_loop(&listener, &mut reactor, &conns, &mut streams, &router);
+                accept_loop(&listener, &mut reactor, &conns, &mut streams);
                 continue;
             }
             let Some(idx) = http_slot(token) else {
@@ -236,9 +263,7 @@ fn accept_loop<'a>(
     reactor: &mut Reactor,
     conns: &'a ConnTable<CONN_CAP>,
     streams: &mut [Option<Conn<'a>>],
-    router: &Router,
 ) {
-    let buf_cap = buf_capacity_for(router.cfg.max_header_bytes, router.cfg.max_body_bytes);
     loop {
         match listener.accept() {
             Ok(Some((stream, peer))) => {
@@ -256,10 +281,12 @@ fn accept_loop<'a>(
                 {
                     continue; // slot guard drops -> slot released
                 }
+                // 4 KiB at accept. GET/HEAD never touch max_body. A large
+                // POST may reserve once toward buf_cap (ALLOC-04).
                 streams[idx] = Some(Conn {
                     stream,
                     peer,
-                    buf: Vec::with_capacity(buf_cap),
+                    buf: Vec::with_capacity(IN_CAP),
                     pos: 0,
                     out: Vec::with_capacity(OUT_CAP),
                     out_off: 0,
@@ -274,13 +301,29 @@ fn accept_loop<'a>(
     }
 }
 
-fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
+fn park_out(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
     if copy_into_out(&mut c.out, bytes) {
         return Ok(());
     }
-    // Does not fit. Flush any already-queued bytes first so a
-    // write_all of `bytes` cannot overtake them (pipelined responses).
+    let need = c.out.len().saturating_add(bytes.len());
+    if need > out_max() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "epoll: out cap (ALLOC-01)",
+        ));
+    }
+    c.out.reserve(bytes.len());
+    c.out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
+    // Write first when `out` is empty (cached GET: one send, no extra
+    // copy). Park into `out` only for a leftover or a queued tail.
     if !c.out.is_empty() {
+        if copy_into_out(&mut c.out, bytes) {
+            return Ok(());
+        }
         flush_out(c)?;
         if copy_into_out(&mut c.out, bytes) {
             return Ok(());
@@ -292,7 +335,12 @@ fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
             ));
         }
     }
-    c.stream.write_all(bytes)
+    match c.stream.writev(&[bytes]) {
+        Ok(n) if n == bytes.len() => Ok(()),
+        Ok(n) => park_out(c, &bytes[n..]),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => park_out(c, bytes),
+        Err(e) => Err(e),
+    }
 }
 
 fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::Result<bool> {
@@ -301,7 +349,11 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
         match c.stream.read(&mut tmp) {
             Ok(0) => return Ok(false),
             Ok(n) => {
-                if !append_in_cap(&mut c.buf, &tmp[..n]) {
+                let max = buf_capacity_for(
+                    router.cfg.max_header_bytes,
+                    router.cfg.max_body_bytes,
+                );
+                if !append_bounded(&mut c.buf, &tmp[..n], max) {
                     return Ok(false);
                 }
                 // Hot state: sequence + activity on every step (the
@@ -490,5 +542,17 @@ mod tests {
         assert_eq!(enc.capacity(), cap);
         assert!(!enc.is_empty());
         assert!(enc.len() <= OUT_CAP);
+    }
+
+    #[test]
+    fn out_max_covers_byte_path_file() {
+        assert_eq!(out_max(), SF_MIN as usize + OUT_CAP);
+        assert!(out_max() > 64 * 1024);
+    }
+
+    #[test]
+    fn accept_reserve_is_4k() {
+        assert_eq!(IN_CAP, 4096);
+        assert!(IN_CAP < 16 * 1024);
     }
 }

@@ -1,5 +1,5 @@
 //! Observability (standard \[OBS\]): lock-free per-core counters (padded
-//! atomics from the framework) and a pull-based Unix socket endpoint : 
+//! atomics from the framework) and a pull-based Unix socket endpoint.
 //! no allocation in the hot path, no HTTP stack. The endpoint accepts
 //! one connection at a time, writes the metrics text, and closes.
 //!
@@ -90,23 +90,36 @@ fn push_num(out: &mut String, mut v: u64) {
     out.push_str(unsafe { std::str::from_utf8_unchecked(&buf[n..]) });
 }
 
-/// The engine-wide metrics bundle: per-core [`CounterSet`]s for packets,
-/// bytes and drops, plus the totals across cores.
+/// Per-worker counters packed on one cache line. One core owns the
+/// line; adjacent workers do not share it. Three related updates per
+/// packet stay in L1 instead of three padded lines.
+#[repr(align(64))]
+pub struct CoreCounters {
+    packets: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    drops: std::sync::atomic::AtomicU64,
+}
+
+impl CoreCounters {
+    fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
+        CoreCounters {
+            packets: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+        }
+    }
+}
+
+/// The engine-wide metrics bundle: one [`CoreCounters`] line per worker.
 pub struct Metrics {
-    /// Per-core packet counters.
-    packets: Vec<CounterSet>,
-    /// Per-core byte counters.
-    bytes: Vec<CounterSet>,
-    /// Per-core drop counters.
-    drops: Vec<CounterSet>,
+    cores: Box<[CoreCounters]>,
 }
 
 impl Metrics {
     pub fn new(cores: usize) -> Self {
         Metrics {
-            packets: (0..cores).map(|_| CounterSet::new(&["packets"])).collect(),
-            bytes: (0..cores).map(|_| CounterSet::new(&["bytes"])).collect(),
-            drops: (0..cores).map(|_| CounterSet::new(&["drops"])).collect(),
+            cores: (0..cores).map(|_| CoreCounters::new()).collect(),
         }
     }
 
@@ -114,72 +127,72 @@ impl Metrics {
     /// worker only touches its own slot, so the padded counters never
     /// contend).
     pub fn add_packets(&self, core: usize, v: u64) {
-        self.packets[core].add(0, v);
+        self.cores[core]
+            .packets
+            .fetch_add(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn add_bytes(&self, core: usize, v: u64) {
-        self.bytes[core].add(0, v);
+        self.cores[core]
+            .bytes
+            .fetch_add(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn add_drops(&self, core: usize, v: u64) {
-        self.drops[core].add(0, v);
+        self.cores[core]
+            .drops
+            .fetch_add(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Total packets/bytes/drops summed across all cores.
     pub fn totals(&self) -> (u64, u64, u64) {
-        let sum = |sets: &[CounterSet]| -> u64 { sets.iter().map(|s| s.load(0)).sum() };
-        (sum(&self.packets), sum(&self.bytes), sum(&self.drops))
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut p = 0u64;
+        let mut b = 0u64;
+        let mut d = 0u64;
+        for c in self.cores.iter() {
+            p += c.packets.load(Relaxed);
+            b += c.bytes.load(Relaxed);
+            d += c.drops.load(Relaxed);
+        }
+        (p, b, d)
     }
 
     /// Format the full metrics text into `out` (no allocation).
     pub fn write_into(&self, out: &mut String) {
+        use std::sync::atomic::Ordering::Relaxed;
         out.push_str("# fds metrics (pull endpoint)\n");
         out.push_str("# cores: ");
-        push_num(out, self.packets.len() as u64);
+        push_num(out, self.cores.len() as u64);
         out.push('\n');
-        if !self.packets.is_empty() {
-            out.push_str("# counter names per core: ");
-            // The counter names come from each per-core set (identical
-            // across cores, so reading core 0's names is representative).
-            for sets in [&self.packets, &self.bytes, &self.drops] {
-                for name in sets[0].names() {
-                    out.push_str(name);
-                    out.push(' ');
-                }
-            }
-            out.push('\n');
+        if !self.cores.is_empty() {
+            out.push_str("# counter names per core: packets bytes drops \n");
         }
-        write_kind(out, &self.packets);
-        write_kind(out, &self.bytes);
-        write_kind(out, &self.drops);
-    }
-}
-
-/// Write one counter kind: a `.total` line summed across cores, then a
-/// `core.<i>.<name>` line per core.
-fn write_kind(out: &mut String, sets: &[CounterSet]) {
-    if sets.is_empty() {
-        return;
-    }
-    let names = sets[0].names();
-    for (j, name) in names.iter().enumerate() {
-        let mut total = 0u64;
-        for set in sets {
-            total += set.load(j);
-        }
-        out.push_str(name);
-        out.push_str(".total ");
-        push_num(out, total);
+        let (p, b, d) = self.totals();
+        out.push_str("packets.total ");
+        push_num(out, p);
         out.push('\n');
-    }
-    for (i, set) in sets.iter().enumerate() {
-        for (j, name) in names.iter().enumerate() {
+        out.push_str("bytes.total ");
+        push_num(out, b);
+        out.push('\n');
+        out.push_str("drops.total ");
+        push_num(out, d);
+        out.push('\n');
+        for (i, c) in self.cores.iter().enumerate() {
             out.push_str("core.");
             push_num(out, i as u64);
-            out.push('.');
-            out.push_str(name);
-            out.push(' ');
-            push_num(out, set.load(j));
+            out.push_str(".packets ");
+            push_num(out, c.packets.load(Relaxed));
+            out.push('\n');
+            out.push_str("core.");
+            push_num(out, i as u64);
+            out.push_str(".bytes ");
+            push_num(out, c.bytes.load(Relaxed));
+            out.push('\n');
+            out.push_str("core.");
+            push_num(out, i as u64);
+            out.push_str(".drops ");
+            push_num(out, c.drops.load(Relaxed));
             out.push('\n');
         }
     }
@@ -204,7 +217,7 @@ impl MetricsServer {
     /// Bind the Unix socket at `path`, best-effort-unlinking a stale
     /// socket file first. Unlink failures are ignored: a stale file
     /// owned by another user must not fail the engine with a misleading
-    /// `PermissionDenied`: the bind below then reports the accurate
+    /// `PermissionDenied`; the bind below then reports the accurate
     /// condition (`AddrInUse` when a socket is actually bound there).
     pub fn bind(path: &Path) -> std::io::Result<Self> {
         match std::fs::remove_file(path) {
@@ -271,6 +284,19 @@ impl Drop for MetricsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_counters_occupy_distinct_lines() {
+        assert_eq!(core::mem::align_of::<CoreCounters>(), 64);
+        assert!(core::mem::size_of::<CoreCounters>() >= 24);
+        let m = Metrics::new(2);
+        let a = &m.cores[0] as *const _ as usize;
+        let b = &m.cores[1] as *const _ as usize;
+        assert!(
+            b.abs_diff(a) >= 64,
+            "adjacent workers share a cache line: {a:#x} {b:#x}"
+        );
+    }
 
     #[test]
     fn counters_add_snapshot() {

@@ -1,7 +1,7 @@
 //! Bounds-safe SIMD helpers (standard \[SIMD\]).
 //!
-//! Discipline: vectorized loops run over array slices only: never past
-//! the slice end: and the remainder is handled by a scalar loop. Length
+//! Discipline: vectorized loops run over array slices only; never past
+//! the slice end; and the remainder is handled by a scalar loop. Length
 //! 0 and unaligned slices are safe (unaligned loads via `_mm256_loadu`).
 //! No vector operation can read or write out of bounds by construction.
 
@@ -71,8 +71,17 @@ unsafe fn sum_u16_avx2(data: &[u8]) -> u32 {
     let mut acc_odd: u64 = 0;
 
     let (chunks, rem) = data.as_chunks::<32>();
-    for chunk in chunks {
-        let v = _mm256_loadu_si256(chunk.as_ptr() as *const __m256i);
+    let aligned = (data.as_ptr() as usize) & 31 == 0;
+    for (i, chunk) in chunks.iter().enumerate() {
+        if i + 1 < chunks.len() {
+            _mm_prefetch(chunks[i + 1].as_ptr() as *const i8, _MM_HINT_T0);
+        }
+        let ptr = chunk.as_ptr() as *const __m256i;
+        let v = if aligned {
+            _mm256_load_si256(ptr)
+        } else {
+            _mm256_loadu_si256(ptr)
+        };
         // even = v & 0x00FF00FF... (keep low byte of each 16-bit lane)
         let even_mask = _mm256_set1_epi16(0x00FF);
         let even = _mm256_and_si256(v, even_mask);
@@ -80,13 +89,16 @@ unsafe fn sum_u16_avx2(data: &[u8]) -> u32 {
         let odd = _mm256_and_si256(_mm256_srli_epi16::<8>(v), even_mask);
         let sad_even = _mm256_sad_epu8(even, _mm256_setzero_si256());
         let sad_odd = _mm256_sad_epu8(odd, _mm256_setzero_si256());
-        // sad returns 4 u64 lanes per 256-bit; store and sum them.
-        let mut e = [0u64; 4];
-        let mut o = [0u64; 4];
-        _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, sad_even);
-        _mm256_storeu_si256(o.as_mut_ptr() as *mut __m256i, sad_odd);
-        acc_even += e[0] + e[1] + e[2] + e[3];
-        acc_odd += o[0] + o[1] + o[2] + o[3];
+        // Horizontal add via extracts: avoid storeu to a stack array
+        // (store-forwarding tax on the SAD result).
+        acc_even += _mm256_extract_epi64::<0>(sad_even) as u64
+            + _mm256_extract_epi64::<1>(sad_even) as u64
+            + _mm256_extract_epi64::<2>(sad_even) as u64
+            + _mm256_extract_epi64::<3>(sad_even) as u64;
+        acc_odd += _mm256_extract_epi64::<0>(sad_odd) as u64
+            + _mm256_extract_epi64::<1>(sad_odd) as u64
+            + _mm256_extract_epi64::<2>(sad_odd) as u64
+            + _mm256_extract_epi64::<3>(sad_odd) as u64;
     }
 
     // Combine: word sum = even_sum * 256 + odd_sum, then add the scalar
@@ -149,7 +161,7 @@ mod tests {
         let c = u16_checksum(data);
         assert_eq!(c, checksum_finalize(sum_u16_scalar(data)));
         // One's complement checksum of itself (with the checksum word
-        // included) folds to zero: property check:
+        // included) folds to zero; property check:
         let sum = sum_u16_scalar(data).wrapping_add(c as u32);
         assert_eq!(checksum_finalize(sum), 0);
     }
