@@ -24,8 +24,12 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-/// Demand decay: fixed-point EMA, 3 fractional bits (see `IpState`).
-const EMA_SHIFT: u32 = 3;
+mod ip;
+mod firewall;
+mod score;
+pub use ip::IpState;
+pub use firewall::BnnFirewall;
+
 
 /// Default per-IP demand limit before the firewall throttles.
 pub const DEFAULT_D_LIMIT: i32 = 64;
@@ -141,56 +145,6 @@ impl Default for Limits {
     }
 }
 
-/// Per-IP integer state (all counters, no floats).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct IpState {
-    /// Demand estimate (EMA, fixed point ×8: `d += n - (d>>3)`).
-    pub demand: u32,
-    /// Requests currently queued/running for this IP.
-    pub queued: u32,
-    /// Live full-duplex connections from this IP.
-    pub conns: u32,
-    /// Exception (whitelist) flag: bypasses the firewall.
-    pub exception: bool,
-    /// Wait ticks of the oldest queued item.
-    pub wait_ticks: u32,
-    /// Requests in the current window (1 s, rolling decay).
-    pub recent: u32,
-    /// Incomplete handshakes (SYN without ACK).
-    pub syns: u32,
-    /// Malformed requests / protocol errors.
-    pub errs: u32,
-    /// Set once any firewall feature crosses a low-water mark; the
-    /// admission gate skips the firewall predicate entirely while this
-    /// is clear (the fast/shortcut path — the firewall cannot fail).
-    pub hot: bool,
-}
-
-impl IpState {
-    /// `D = (7D + n) >> 3` — the integer EMA, one multiply-add+shift.
-    /// `D` is stored in fixed point with 3 fractional bits (units of
-    /// 1/8): a naive `(7D+n)>>3` on integer D can never leave 0
-    /// (truncation), so the equivalent `D += n - (D>>3)` form is used,
-    /// and demand thresholds/priotities compare against `limit << 3`.
-    ///
-    /// Band invariant (; machine-checked in Lean
-    /// `docs/paper/lean/Scheduler.lean`): for sustained rate `n` the
-    /// fixed point is `8n` and the invariant band is `[8n, 8n+7]`. The
-    /// `debug_assert` machine-checks the in-band direction (an in-band
-    /// state stays in-band); out-of-band states (cold start, deliberate
-    /// test pokes) are outside the theorem's hypothesis and not claimed.
-    #[inline]
-    pub fn demand_update(&mut self, n: u32) {
-        let in_band = (self.demand as u64) <= (8 * n as u64) + 7;
-        self.demand = self.demand.wrapping_add(n).wrapping_sub(self.demand >> EMA_SHIFT);
-        debug_assert!(
-            !in_band || (self.demand as u64) <= (8 * n as u64) + 7,
-            "EMA band [8n, 8n+7] is invariant under the in-band update"
-        );
-    }
-}
-
-/// Outcome of the admission controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admission {
     /// Accepted into the queue; a guard decrements on completion.
@@ -201,22 +155,12 @@ pub enum Admission {
     Rejected,
 }
 
-/// Optional adaptive firewall hook (binarized/deterministic net).
-/// Default is `None` -> the threshold predicate only.
-pub trait BnnFirewall: Send + Sync {
-    fn predict(&self, features: &[i16; 8]) -> bool;
-}
-
-/// The scheduler: integer state + rule-mode weights + global limits.
-/// Wrapped in a `Mutex` because H2/H3 dispatch is multi-threaded; the
-/// lock is a single fast `parking_lot` critical section per request
-/// (per-core sharding is the documented follow-up).
 pub struct Sched {
     pub rule: RuleMode,
     pub custom: Weights,
     pub limits: Limits,
     pub bnn: Option<Arc<dyn BnnFirewall>>,
-    ips: hashbrown::HashMap<u32, IpState>,
+    pub(crate) ips: hashbrown::HashMap<u32, IpState>,
     /// Total in-flight requests.
     pub q_total: u32,
     /// Total live connections.
@@ -285,47 +229,7 @@ impl Sched {
 
     /// Firewall precondition: every feature under its threshold, or the
     /// IP is an exception. O(1) comparisons. Demand is fixed-point
-    /// (×8), so the threshold is `d_limit << 3`.
-    pub fn firewall_pass(&self, ip: &IpState) -> bool {
-        if ip.exception {
-            return true;
-        }
-        ip.demand as i32 <= (self.limits.d_limit << 3)
-            && ip.recent <= 1024
-            && ip.syns <= 256
-            && ip.errs <= 64
-    }
 
-    /// Optional BNN inference over the quantized feature vector.
-    pub fn firewall_adaptive(&self, key: u32) -> bool {
-        let Some(bnn) = &self.bnn else { return true };
-        let ip = self.ips.get(&key).copied().unwrap_or_default();
-        let f: [i16; 8] = [
-            ip.demand.min(255) as i16,
-            ip.queued.min(255) as i16,
-            ip.conns.min(255) as i16,
-            ip.wait_ticks.min(255) as i16,
-            ip.recent.min(255) as i16,
-            ip.syns.min(255) as i16,
-            ip.errs.min(255) as i16,
-            0,
-        ];
-        bnn.predict(&f)
-    }
-
-    /// Request admission, fragmented into fast/shortcut paths so each
-    /// request pays only for the checks it needs:
-    ///
-    /// 1. **Global bound** — one load + compare, no table access.
-    /// 2. **Per-IP update + bound** — one hash lookup, one compare.
-    /// 3. **Firewall** — SKIPPED entirely unless the per-IP `hot` flag
-    ///    is set (it only sets once a feature crosses a low-water mark,
-    ///    which normal traffic never does).
-    /// 4. **Commit** — two increments.
-    ///
-    /// The priority score is NOT computed here: nothing consumes it
-    /// (the scheduler queue is a separate component that would call
-    /// [`Sched::priority`]). Returns only the outcome.
     pub fn admit_request(&mut self, key: u32) -> Admission {
         // Shortcut 1: global queue bound, before touching the table.
         if self.q_total >= self.limits.q_max {
@@ -379,43 +283,7 @@ impl Sched {
     }
 
     /// Admission score `A_i` (diversity + demand + exception + wait - q).
-    /// Demand is fixed-point (×8), hence `d_limit << 3`.
-    pub fn admission_score(&self, ip: &IpState, w: Weights) -> i32 {
-        let div = (ip.queued == 0) as i32;
-        (w.div * div)
-            + (w.dem * ((self.limits.d_limit << 3) - ip.demand as i32))
-            + (w.exc * ip.exception as i32)
-            + (w.wait * ip.wait_ticks as i32)
-            - (w.qpen * ip.queued as i32)
-    }
 
-    /// Scheduler priority `P_j` for item j (no diversity term; the item
-    /// is already admitted). `wait_j` is the item's own wait ticks.
-    pub fn priority(&self, key: u32, wait_j: u32) -> i32 {
-        let w = Weights::for_mode(self.rule, self.custom);
-        let ip = self.ips.get(&key).copied().unwrap_or_default();
-        (w.dem * ((self.limits.d_limit << 3) - ip.demand as i32))
-            + (w.wait * wait_j as i32)
-            + (w.exc * ip.exception as i32)
-            - (w.qpen * ip.queued as i32)
-    }
-
-    /// Core assignment: `argmin(L_c << 8 + Z_{i,c} << 16)` — load
-    /// balance with same-IP affinity.
-    pub fn core_assign(loads: &[u32], affinity: &[bool]) -> usize {
-        let mut best = 0usize;
-        let mut best_score = u32::MAX;
-        for (c, (&l, &z)) in loads.iter().zip(affinity.iter()).enumerate() {
-            let score = (l << 8) + ((z as u32) << 16);
-            if score < best_score {
-                best_score = score;
-                best = c;
-            }
-        }
-        best
-    }
-
-    /// Full-duplex connection admission (transport level).
     pub fn admit_conn(&mut self, key: u32) -> bool {
         let c_per_ip = self.limits.c_per_ip;
         let c_max = self.limits.c_max;
