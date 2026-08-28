@@ -8,12 +8,13 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
 
+use crate::align::LineAtomicU64;
 use crate::error::ServeError;
 use crate::error_page::ErrorPage;
 use crate::io::{CacheDirective, FileBody, In, Method, Out, OutBody};
@@ -80,7 +81,7 @@ impl FdCache {
 pub struct StaticMod {
     root: PathBuf,
     errors: ErrorPage,
-    pub hits: AtomicU64,
+    pub hits: LineAtomicU64,
     fd: Mutex<FdCache>,
 }
 
@@ -89,9 +90,9 @@ impl StaticMod {
         Arc::new(Self {
             root,
             errors,
-            hits: AtomicU64::new(0),
+            hits: LineAtomicU64::new(0),
             fd: Mutex::new(FdCache {
-                map: HashMap::new(),
+                map: HashMap::with_capacity(FD_CACHE_MAX),
                 seq: 0,
             }),
         })
@@ -116,7 +117,7 @@ impl Module for StaticMod {
     }
 
     fn handle(&self, req: &In<'_>) -> Result<Out, ServeError> {
-        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.hits.v.fetch_add(1, Ordering::Relaxed);
         if req.method != Method::Get && req.method != Method::Head {
             return Err(ServeError::Parse);
         }
@@ -267,6 +268,8 @@ mod tests {
             peer: peer(),
             flags: FlagSet::empty(),
         };
+        assert_eq!(std::mem::align_of::<LineAtomicU64>(), 64);
+        assert_eq!(std::mem::size_of::<LineAtomicU64>(), 64);
         let a = m.handle(&mk("/")).unwrap();
         assert_eq!(a.status.as_u16(), 200);
         assert!(std::str::from_utf8(a.body.as_bytes()).unwrap().contains("<h1>ok"));

@@ -8,13 +8,14 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::align::LineAtomicU64;
 use crate::error::ServeError;
 use crate::io::OutBody;
 use crate::proto;
@@ -24,12 +25,12 @@ use crate::route::Router;
 /// blocks, frames, bodies) — the wire-side of the compression proxy.
 pub struct CountingIo<S> {
     inner: S,
-    rx: Arc<AtomicU64>,
-    tx: Arc<AtomicU64>,
+    rx: Arc<LineAtomicU64>,
+    tx: Arc<LineAtomicU64>,
 }
 
 impl<S> CountingIo<S> {
-    pub fn new(inner: S, rx: Arc<AtomicU64>, tx: Arc<AtomicU64>) -> Self {
+    pub fn new(inner: S, rx: Arc<LineAtomicU64>, tx: Arc<LineAtomicU64>) -> Self {
         Self { inner, rx, tx }
     }
 }
@@ -44,6 +45,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for CountingIo<S> {
         let res = Pin::new(&mut self.inner).poll_read(cx, buf);
         if res.is_ready() {
             self.rx
+                .v
                 .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
         }
         res
@@ -58,7 +60,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CountingIo<S> {
     ) -> Poll<std::io::Result<usize>> {
         let res = Pin::new(&mut self.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(n)) = res {
-            self.tx.fetch_add(n as u64, Ordering::Relaxed);
+            self.tx.v.fetch_add(n as u64, Ordering::Relaxed);
         }
         res
     }
@@ -95,8 +97,8 @@ where
     let Some(_conn_guard) = router.admit_conn(peer) else {
         return Ok(());
     };
-    let rx = Arc::new(AtomicU64::new(0));
-    let tx = Arc::new(AtomicU64::new(0));
+    let rx = Arc::new(LineAtomicU64::new(0));
+    let tx = Arc::new(LineAtomicU64::new(0));
     let counted = CountingIo::new(io, rx.clone(), tx.clone());
     let mut conn = h2::server::Builder::new()
         .max_concurrent_streams(256)
@@ -120,12 +122,12 @@ where
         .metrics
         .h2_wire_in
         .v
-        .fetch_add(rx.load(Ordering::Relaxed), Ordering::Relaxed);
+        .fetch_add(rx.v.load(Ordering::Relaxed), Ordering::Relaxed);
     router
         .metrics
         .h2_wire_out
         .v
-        .fetch_add(tx.load(Ordering::Relaxed), Ordering::Relaxed);
+        .fetch_add(tx.v.load(Ordering::Relaxed), Ordering::Relaxed);
     Ok(())
 }
 

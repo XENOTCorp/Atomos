@@ -238,7 +238,7 @@ fn default_cache_entries() -> usize {
     4096
 }
 fn default_cache_bytes() -> usize {
-    268435456
+    16 * 1024 * 1024
 }
 fn default_rules() -> PathBuf {
     PathBuf::from("rules.json")

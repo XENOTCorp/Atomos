@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use bytes::Bytes;
 use hashbrown::Equivalent;
 use hashbrown::HashMap;
 
+use crate::align::LineAtomicU64;
 use crate::encode::encode_response;
 use crate::io::{CacheDirective, Method, Out};
 
@@ -86,7 +87,7 @@ type NamedMap = HashMap<Box<str>, u64>;
 pub struct ResponseCache {
     cap: usize,
     cap_bytes: usize,
-    pub epoch: Arc<AtomicU64>,
+    pub epoch: Arc<LineAtomicU64>,
     named: Arc<ArcSwap<NamedMap>>,
 }
 
@@ -95,14 +96,14 @@ impl ResponseCache {
         Self {
             cap: cap.max(1),
             cap_bytes: cap_bytes.max(1024),
-            epoch: Arc::new(AtomicU64::new(0)),
+            epoch: Arc::new(LineAtomicU64::new(0)),
             named: Arc::new(ArcSwap::from_pointee(NamedMap::new())),
         }
     }
 
     /// Drop all Global cached hits. GET-only; no map lock.
     pub fn invalidate(&self) {
-        self.epoch.fetch_add(1, Ordering::Release);
+        self.epoch.v.fetch_add(1, Ordering::Release);
     }
 
     /// Drop hits stored under `CacheDirective::Named { ruleset: id, .. }`.
@@ -121,7 +122,7 @@ impl ResponseCache {
         }
         let cur = match &e.name {
             Some(n) => self.named.load().get(n.as_ref()).copied().unwrap_or(0),
-            None => self.epoch.load(Ordering::Acquire),
+            None => self.epoch.v.load(Ordering::Acquire),
         };
         e.epoch == cur
     }
@@ -201,7 +202,7 @@ impl ResponseCache {
         let cap_bytes = self.cap_bytes;
         let epoch = match &name {
             Some(n) => self.named.load().get(n.as_ref()).copied().unwrap_or(0),
-            None => self.epoch.load(Ordering::Acquire),
+            None => self.epoch.v.load(Ordering::Acquire),
         };
         self.with_inner(|inner| {
             while inner.map.len() >= cap || inner.bytes.saturating_add(nbytes) > cap_bytes {
@@ -294,6 +295,14 @@ mod tests {
         c.invalidate_named("notes");
         assert!(c.get_wire(Method::Get, "/g", "").is_some());
         assert!(c.get_wire(Method::Get, "/n", "").is_none());
+    }
+
+    #[test]
+    fn epoch_is_one_cache_line() {
+        assert_eq!(std::mem::align_of::<crate::align::LineAtomicU64>(), 64);
+        assert_eq!(std::mem::size_of::<crate::align::LineAtomicU64>(), 64);
+        let c = ResponseCache::new(1, 1024);
+        let _ = &c.epoch.v;
     }
 
     #[test]

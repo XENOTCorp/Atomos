@@ -156,7 +156,7 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
     for i in 0..CONN_CAP {
         conns.initialize(i, Connection::new("0.0.0.0:0".parse().unwrap(), now));
     }
-    let mut streams: HashMap<u64, Conn<'_>> = HashMap::new();
+    let mut streams: HashMap<u64, Conn<'_>> = HashMap::with_capacity(CONN_CAP);
 
     // 200 ms poll timeout doubles as the stop-poll cadence (shutdown
     // latency <= 200 ms), matching the pre-FDS engine.
@@ -251,7 +251,7 @@ fn accept_loop<'a>(
                         peer,
                         buf: Vec::with_capacity(4096),
                         pos: 0,
-                        out: Vec::new(),
+                        out: Vec::with_capacity(2048),
                         out_off: 0,
                         pending_sf: None,
                         slot,

@@ -259,16 +259,22 @@ impl Sched {
             .collect()
     }
 
-    /// FNV-1a over the address bytes — the IP hash key.
+    /// FNV-1a over the address bytes. The IP hash key. No heap.
     pub fn ip_key(peer: std::net::SocketAddr) -> u32 {
         let mut h = 0x811c_9dc5u32;
-        let bytes = match peer {
-            std::net::SocketAddr::V4(a) => a.ip().octets().to_vec(),
-            std::net::SocketAddr::V6(a) => a.ip().octets().to_vec(),
-        };
-        for b in bytes {
-            h ^= b as u32;
-            h = h.wrapping_mul(0x0100_0193);
+        match peer {
+            std::net::SocketAddr::V4(a) => {
+                for b in a.ip().octets() {
+                    h ^= b as u32;
+                    h = h.wrapping_mul(0x0100_0193);
+                }
+            }
+            std::net::SocketAddr::V6(a) => {
+                for b in a.ip().octets() {
+                    h ^= b as u32;
+                    h = h.wrapping_mul(0x0100_0193);
+                }
+            }
         }
         h
     }
@@ -685,5 +691,11 @@ mod tests {
                 s.state(k).demand
             );
         }
+    }
+
+    #[test]
+    fn ip_key_loopback_v4_is_stable() {
+        let a: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        assert_eq!(Sched::ip_key(a), 3668918509);
     }
 }
