@@ -46,6 +46,7 @@ use crate::route::Router;
 use crate::static_mod::SF_MIN;
 
 mod conn;
+mod tlsio;
 mod write;
 use conn::{Conn, PendingSf};
 use write::flush_out;
@@ -157,18 +158,34 @@ pub fn run(router: Arc<Router>, ctx: Arc<AtomCtx>) -> Result<(), ServeError> {
     ctx.signal.v.store(STATE_ON, Ordering::Release);
     tracing::info!(local = %addr, workers = n, engine = "epoll", "atomos listen");
 
+    let tls_cfg = if router.cfg.h1_tls {
+        let ocsp = match &router.cfg.tls_ocsp {
+            Some(p) => Some(std::fs::read(p)?),
+            None => None,
+        };
+        Some(crate::tls::h1_only_server(
+            router.cfg.tls_cert.as_deref(),
+            router.cfg.tls_key.as_deref(),
+            ocsp.as_deref(),
+            router.cfg.tls_ticket_lifetime_secs,
+        )?)
+    } else {
+        None
+    };
+
     let mut joins = Vec::with_capacity(n as usize);
     for i in 0..n {
         let tcp = tcps.remove(0);
         let router = router.clone();
         let ctx = ctx.clone();
+        let tls_cfg = tls_cfg.clone();
         let h = std::thread::Builder::new()
             .name(format!("atomos-epoll-{i}"))
             .spawn(move || {
                 if router.cfg.cpu_pin {
                     let _ = pin_cpu::pin_to_cpu(i as usize);
                 }
-                if let Err(e) = worker(tcp, router, ctx) {
+                if let Err(e) = worker(tcp, router, ctx, tls_cfg) {
                     tracing::debug!(%e, "epoll worker");
                 }
             })
@@ -181,7 +198,12 @@ pub fn run(router: Arc<Router>, ctx: Arc<AtomCtx>) -> Result<(), ServeError> {
     Ok(())
 }
 
-fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::Result<()> {
+fn worker(
+    listener: TcpListener,
+    router: Arc<Router>,
+    ctx: Arc<AtomCtx>,
+    tls_cfg: Option<Arc<rustls::ServerConfig>>,
+) -> io::Result<()> {
     let mut reactor = Reactor::new(64)?;
     reactor.register(listener.as_raw_fd(), TOKEN_LISTENER, Interest::Readable)?;
 
@@ -195,6 +217,8 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
     }
     let mut streams: Vec<Option<Conn<'_>>> = (0..CONN_CAP).map(|_| None).collect();
     let mut enc = Vec::with_capacity(OUT_CAP);
+    let mut listener = Some(listener);
+    let mut drain_since: Option<Instant> = None;
 
     // 200 ms poll timeout doubles as the stop-poll cadence (shutdown
     // latency <= 200 ms), matching the pre-FDS engine.
@@ -207,20 +231,45 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
         if ctx.stop.v.load(Ordering::Acquire) != 0 {
             break;
         }
+        if ctx.drain.v.load(Ordering::Acquire) != 0 {
+            if drain_since.is_none() {
+                drain_since = Some(Instant::now());
+                if let Some(l) = listener.take() {
+                    let _ = reactor.unregister(l.as_raw_fd());
+                    drop(l);
+                }
+            }
+            let wait_ms = router.cfg.worker_shutdown_timeout_ms.max(1);
+            let expired = drain_since
+                .map(|t| t.elapsed().as_millis() as u64 >= wait_ms)
+                .unwrap_or(false);
+            let empty = streams.iter().all(|s| s.is_none());
+            if expired || empty {
+                for slot in streams.iter_mut() {
+                    if let Some(c) = slot.take() {
+                        let _ = reactor.unregister(c.stream.as_raw_fd());
+                    }
+                }
+                ctx.stop.v.store(1, Ordering::Release);
+                break;
+            }
+        }
         let n = match reactor.poll_timeout(Some(&timeout)) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
+        reap_idle(&mut reactor, &mut streams, &router, &mut enc);
         if n == 0 {
-            reap_idle(&mut reactor, &mut streams, &router);
             continue;
         }
         let m = reactor.copy_events(n, &mut evbuf);
         for ev in evbuf.iter().take(m) {
             let token = ev.token;
             if token == TOKEN_LISTENER {
-                accept_loop(&listener, &mut reactor, &conns, &mut streams);
+                if let Some(l) = listener.as_ref() {
+                    accept_loop(l, &mut reactor, &conns, &mut streams, tls_cfg.as_ref());
+                }
                 continue;
             }
             let Some(idx) = http_slot(token) else {
@@ -238,11 +287,12 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
                         Err(_) => drop_fd = true,
                     }
                 }
-                let busy = !c.out.is_empty() || c.pending_sf.is_some();
+                let busy = !c.out.is_empty() || c.pending_sf.is_some() || tlsio::wants_write(c);
                 if busy && (ev.writable || ev.readable) {
                     if flush_out(c).is_err() {
                         drop_fd = true;
-                    } else if c.out.is_empty() && c.pending_sf.is_none() {
+                    } else if c.out.is_empty() && c.pending_sf.is_none() && !tlsio::wants_write(c)
+                    {
                         let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::Readable);
                     } else {
                         let _ =
@@ -269,6 +319,7 @@ fn accept_loop<'a>(
     reactor: &mut Reactor,
     conns: &'a ConnTable<CONN_CAP>,
     streams: &mut [Option<Conn<'a>>],
+    tls_cfg: Option<&Arc<rustls::ServerConfig>>,
 ) {
     loop {
         match listener.accept() {
@@ -287,6 +338,13 @@ fn accept_loop<'a>(
                 {
                     continue; // slot guard drops -> slot released
                 }
+                let tls = match tls_cfg {
+                    Some(cfg) => match rustls::ServerConnection::new(cfg.clone()) {
+                        Ok(c) => Some(Box::new(c)),
+                        Err(_) => continue,
+                    },
+                    None => None,
+                };
                 // 4 KiB at accept. GET/HEAD never touch max_body. A large
                 // POST may reserve once toward buf_cap (ALLOC-04).
                 streams[idx] = Some(Conn {
@@ -298,6 +356,9 @@ fn accept_loop<'a>(
                     out_off: 0,
                     pending_sf: None,
                     last_rw: Instant::now(),
+                    hdr_t0: None,
+                    served: false,
+                    tls,
                     slot,
                 });
             }
@@ -342,7 +403,7 @@ fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
             ));
         }
     }
-    match c.stream.writev(&[bytes]) {
+    match tlsio::write_plain(c, bytes) {
         Ok(n) if n == bytes.len() => Ok(()),
         Ok(n) => park_out(c, &bytes[n..]),
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => park_out(c, bytes),
@@ -352,11 +413,22 @@ fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
 
 fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::Result<bool> {
     let mut tmp = [0u8; 4096];
+    let mut eof = false;
     loop {
-        match c.stream.read(&mut tmp) {
-            Ok(0) => return Ok(false),
-            Ok(n) => {
+        match tlsio::read_plain(c, &mut tmp) {
+            Ok(None) => break,
+            Ok(Some(0)) => {
+                if c.tls.as_ref().is_some_and(|t| t.is_handshaking()) {
+                    return Ok(true);
+                }
+                eof = true;
+                break;
+            }
+            Ok(Some(n)) => {
                 c.last_rw = Instant::now();
+                if c.hdr_t0.is_none() {
+                    c.hdr_t0 = Some(c.last_rw);
+                }
                 let max = buf_capacity_for(
                     router.cfg.max_header_bytes,
                     router.cfg.max_body_bytes,
@@ -370,8 +442,7 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                 hot.seq = hot.seq.wrapping_add(n as u32);
                 hot.last_activity = now_ticks();
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e),
+            Err(_) => return Ok(false),
         }
         if c.buf.len() - c.pos > router.cfg.max_header_bytes + router.cfg.max_body_bytes {
             return Ok(false);
@@ -384,7 +455,7 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
             c.pos = 0;
         }
         match parse_request(&c.buf[c.pos..], router.cfg.max_header_bytes) {
-            Ok(ParseStatus::Partial) => return Ok(true),
+            Ok(ParseStatus::Partial) => return Ok(!eof),
             Err(_) => {
                 reply_status(c, enc, Status::BAD_REQUEST)?;
                 return Ok(false);
@@ -415,6 +486,8 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                             encode_response(&o, enc);
                             let ka = p.keepalive;
                             c.pos = need;
+                            c.served = true;
+                            c.hdr_t0 = None;
                             queue_bytes(c, enc)?;
                             if !ka {
                                 let _ = flush_out(c);
@@ -427,6 +500,8 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                             encode_head(&hit, enc);
                             let ka = p.keepalive;
                             c.pos = need;
+                            c.served = true;
+                            c.hdr_t0 = None;
                             queue_bytes(c, enc)?;
                             if !ka {
                                 let _ = flush_out(c);
@@ -445,6 +520,8 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                                 );
                             }
                             c.pos = need;
+                            c.served = true;
+                            c.hdr_t0 = None;
                             queue_bytes(c, wire.as_ref())?;
                             if !ka {
                                 let _ = flush_out(c);
@@ -504,15 +581,10 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                     queue_bytes(c, enc)?;
                     if let OutBody::Stream(s) = &out.body {
                         let mut rx = s.take();
-                        loop {
-                            match rx.try_recv() {
-                                Ok(chunk) => {
-                                    enc.clear();
-                                    append_chunk(enc, &chunk);
-                                    queue_bytes(c, enc)?;
-                                }
-                                Err(_) => break,
-                            }
+                        while let Ok(chunk) = rx.try_recv() {
+                            enc.clear();
+                            append_chunk(enc, &chunk);
+                            queue_bytes(c, enc)?;
                         }
                     }
                     enc.clear();
@@ -533,6 +605,8 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                     access_log::emit(method, &path, out.status.as_u16(), out.body.len());
                 }
                 c.pos = need;
+                c.served = true;
+                c.hdr_t0 = None;
                 if !ka {
                     let _ = flush_out(c);
                     return Ok(false);
@@ -551,24 +625,41 @@ fn reply_status(c: &mut Conn<'_>, enc: &mut Vec<u8>, st: Status) -> io::Result<(
     Ok(())
 }
 
-fn reap_idle(reactor: &mut Reactor, streams: &mut [Option<Conn<'_>>], router: &Router) {
+fn reap_idle(
+    reactor: &mut Reactor,
+    streams: &mut [Option<Conn<'_>>],
+    router: &Router,
+    enc: &mut Vec<u8>,
+) {
     let now = Instant::now();
     for slot in streams.iter_mut() {
         let Some(c) = slot.as_ref() else {
             continue;
         };
-        let idle_ms = now.saturating_duration_since(c.last_rw).as_millis() as u64;
         let pending = c.buf.len() > c.pos;
         let headers_done = pending && find_header_end(&c.buf[c.pos..]).is_some();
-        let limit = if !pending {
-            router.cfg.idle_timeout_ms
-        } else if headers_done {
-            router.cfg.body_timeout_ms
+        let (t0, limit, body_to) = if !pending {
+            // New conn with no bytes: header budget. Keep-alive idle
+            // after a served request: idle budget.
+            let limit = if c.served {
+                router.cfg.idle_timeout_ms
+            } else {
+                router.cfg.header_timeout_ms
+            };
+            (c.last_rw, limit, false)
+        } else if !headers_done {
+            (c.hdr_t0.unwrap_or(c.last_rw), router.cfg.header_timeout_ms, false)
         } else {
-            router.cfg.header_timeout_ms
+            (c.last_rw, router.cfg.body_timeout_ms, true)
         };
+        let idle_ms = now.saturating_duration_since(t0).as_millis() as u64;
         if idle_ms <= limit.max(1) {
             continue;
+        }
+        if body_to {
+            if let Some(c) = slot.as_mut() {
+                let _ = reply_status(c, enc, Status::REQUEST_TIMEOUT);
+            }
         }
         if let Some(c) = slot.take() {
             let _ = reactor.unregister(c.stream.as_raw_fd());
@@ -662,6 +753,6 @@ mod tests {
     #[test]
     fn accept_reserve_is_4k() {
         assert_eq!(IN_CAP, 4096);
-        assert!(IN_CAP < 16 * 1024);
+        const { assert!(IN_CAP < 16 * 1024); }
     }
 }

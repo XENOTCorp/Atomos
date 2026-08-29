@@ -46,6 +46,8 @@ pub struct Config {
     #[serde(default = "defaults::default_idle_timeout")]
     pub idle_timeout_ms: u64,
     /// After `handle` returns, 504 if the call ran longer than this.
+    /// Sync `Module::handle` cannot be cancelled; 504 is best-effort
+    /// after return. Over-budget modules are a contract violation.
     #[serde(default = "defaults::default_module_timeout")]
     pub module_timeout_ms: u64,
     #[serde(default = "defaults::default_mem")]
@@ -78,6 +80,10 @@ pub struct Config {
     pub http3: bool,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
+    /// Terminate TLS 1.3 on the epoll H1 engine (ALPN `http/1.1` only).
+    /// Set true when `tls_cert`/`tls_key` are present and `engine=epoll`.
+    #[serde(default = "defaults::default_false")]
+    pub h1_tls: bool,
     /// Ports this process will not bind. Empty by default (no hardcoded list).
     #[serde(default)]
     pub refuse_ports: Vec<u16>,
@@ -110,6 +116,9 @@ pub struct Config {
     /// Wasm fuel units per `handle`. Default 10_000_000.
     #[serde(default = "defaults::default_wasm_fuel")]
     pub wasm_fuel: u64,
+    /// Guest linear memory cap per instance. Default 16 MiB.
+    #[serde(default = "defaults::default_wasm_memory")]
+    pub wasm_memory_bytes: usize,
     /// OCSP staple DER/file. Read at TLS load; never fetched on GET.
     pub tls_ocsp: Option<PathBuf>,
     /// Ticket lifetime seconds for rustls. 0 = rustls default.
@@ -201,8 +210,11 @@ pub enum MemoryMode {
 
 impl Config {
     pub fn from_json(raw: &[u8]) -> Result<Self, ServeError> {
-        let c: Config = serde_json::from_slice(raw)
+        let mut c: Config = serde_json::from_slice(raw)
             .map_err(|e| ServeError::Config(e.to_string().into_boxed_str()))?;
+        if c.tls_cert.is_some() && c.tls_key.is_some() && c.engine == "epoll" {
+            c.h1_tls = true;
+        }
         c.validate()?;
         Ok(c)
     }

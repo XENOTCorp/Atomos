@@ -9,6 +9,10 @@ use crate::io::{In, InOwned, Out};
 
 pub trait Module: Send + Sync + 'static {
     fn name(&self) -> &'static str;
+    /// Run-to-completion. The engine starts a deadline before this
+    /// call. Sync `handle` cannot be cancelled mid-function: a 504 is
+    /// best-effort after return. Over-budget work is a contract
+    /// violation. Wasm maps fuel/epoch/memory traps to 504.
     fn handle(&self, req: &In<'_>) -> Result<Out, ServeError>;
 }
 

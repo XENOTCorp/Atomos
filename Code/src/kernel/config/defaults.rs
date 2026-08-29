@@ -26,6 +26,9 @@ pub(crate) fn default_shutdown_ms() -> u64 {
 pub(crate) fn default_wasm_fuel() -> u64 {
     10_000_000
 }
+pub(crate) fn default_wasm_memory() -> usize {
+    16 * 1024 * 1024
+}
 pub(crate) fn default_ticket_secs() -> u64 {
     86400
 }

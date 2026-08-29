@@ -19,8 +19,16 @@ pub(crate) struct Conn<'a> {
     /// written: the worker keeps writable interest and skips reads
     /// until it completes (request/response order must be preserved).
     pub(crate) pending_sf: Option<PendingSf>,
-    /// Last successful read or write. Slowloris and idle use this.
+    /// Last successful read or write. Body and idle timeouts use this.
     pub(crate) last_rw: Instant,
+    /// First byte of the current header block. Slowloris uses this
+    /// clock (not `last_rw`) so a 1-byte/2s drip still expires.
+    pub(crate) hdr_t0: Option<Instant>,
+    /// At least one request has been fully served on this slot.
+    pub(crate) served: bool,
+    /// rustls server state when `h1_tls`. Handshake and app data share
+    /// the FDS fd via `read_tls`/`write_tls`.
+    pub(crate) tls: Option<Box<rustls::ServerConnection>>,
     /// Held for the connection's lifetime: dropping it releases the
     /// table slot exactly once (never call `release_slot` while a guard
     /// is alive: that would double-release the free-list ring).

@@ -94,7 +94,13 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
         started: std::time::Instant::now(),
         allow_write: true,
         stop: Arc::new(LineAtomicU8::new(0)),
+        drain: Arc::new(LineAtomicU8::new(0)),
         cache: Arc::new(cache.clone()),
+        audit_path: cfg
+            .control_socket
+            .parent()
+            .map(|p| p.join("audit.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("audit.log")),
     });
     let sched = {
         let (limits, custom) = cfg.scheduler.build();

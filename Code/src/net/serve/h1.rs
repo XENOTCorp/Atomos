@@ -110,11 +110,15 @@ where
                     };
                     let ka = p.keepalive;
                     let head = p.method == crate::io::Method::Head;
-                    let out = if router.has_async() {
+                    let t0 = std::time::Instant::now();
+                    let mut out = if router.has_async() {
                         router.dispatch_async(req).await
                     } else {
                         router.dispatch(req)
                     };
+                    if t0.elapsed().as_millis() as u64 > router.cfg.module_timeout_ms.max(1) {
+                        out = crate::io::Out::empty(crate::status::Status::GATEWAY_TIMEOUT);
+                    }
                     break (out, need, ka, head);
                 }
                 Err(_) => {

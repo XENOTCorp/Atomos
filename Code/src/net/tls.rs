@@ -76,6 +76,20 @@ pub fn load(cert: Option<&Path>, key: Option<&Path>) -> Result<TlsSet, ServeErro
     load_with_opts(cert, key, None, 86400)
 }
 
+/// Epoll H1: same cert loader as proto, ALPN restricted to `http/1.1`.
+/// Clients that offer only `h2` fail the handshake. No H2 on this path.
+pub fn h1_only_server(
+    cert: Option<&Path>,
+    key: Option<&Path>,
+    ocsp: Option<&[u8]>,
+    ticket_lifetime_secs: u64,
+) -> Result<Arc<RustlsServer>, ServeError> {
+    let set = load_with_opts(cert, key, ocsp, ticket_lifetime_secs)?;
+    let mut cfg = (*set.tcp).clone();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(cfg))
+}
+
 pub fn load_with_opts(
     cert: Option<&Path>,
     key: Option<&Path>,
@@ -229,5 +243,11 @@ mod tests {
         let t = load_with_opts(None, None, Some(&[0u8; 8]), 86400).expect("ocsp");
         assert!(!t.tcp.alpn_protocols.is_empty());
         assert_eq!(t.tcp.ticketer.lifetime(), 86400);
+    }
+
+    #[test]
+    fn h1_only_alpn_is_http11() {
+        let c = h1_only_server(None, None, None, 86400).expect("h1");
+        assert_eq!(c.alpn_protocols, vec![b"http/1.1".to_vec()]);
     }
 }
