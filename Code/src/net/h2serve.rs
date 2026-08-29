@@ -102,6 +102,11 @@ where
     let counted = CountingIo::new(io, rx.clone(), tx.clone());
     let mut conn = h2::server::Builder::new()
         .max_concurrent_streams(256)
+        .max_header_list_size(16 * 1024)
+        .max_frame_size(16 * 1024)
+        .max_concurrent_reset_streams(32)
+        .max_pending_accept_reset_streams(20)
+        .max_local_error_reset_streams(Some(32))
         .handshake(counted)
         .await
         .map_err(h2_err)?;

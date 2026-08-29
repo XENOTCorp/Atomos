@@ -8,7 +8,7 @@ use super::H2_PREFACE;
 use super::h1::handle_h1;
 
 pub(crate) async fn handle_tcp(
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
     router: Arc<Router>,
     tls: Arc<TlsHold>,
@@ -37,5 +37,28 @@ pub(crate) async fn handle_tcp(
     {
         return crate::h2serve::handle(stream, peer, router).await;
     }
+    if router.cfg.http2 && !looks_like_h1(&peek[..n]) {
+        // Invalid connection preface: GOAWAY PROTOCOL_ERROR then close.
+        use tokio::io::AsyncWriteExt;
+        const GOAWAY: &[u8] = &[
+            0x00, 0x00, 0x08, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01,
+        ];
+        let _ = stream.write_all(GOAWAY).await;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
     handle_h1(stream, peer, router).await
+}
+
+fn looks_like_h1(peek: &[u8]) -> bool {
+    peek.starts_with(b"GET ")
+        || peek.starts_with(b"POST ")
+        || peek.starts_with(b"HEAD ")
+        || peek.starts_with(b"PUT ")
+        || peek.starts_with(b"DELETE ")
+        || peek.starts_with(b"PATCH ")
+        || peek.starts_with(b"OPTIONS ")
+        || peek.starts_with(b"CONNECT ")
+        || peek.starts_with(b"TRACE ")
 }

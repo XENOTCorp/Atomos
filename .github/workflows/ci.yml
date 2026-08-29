@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 4 * * *"
 
 jobs:
   test:
@@ -31,3 +33,38 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: compile.sh test
         run: ./compile.sh test
+      - name: semantics
+        working-directory: Code
+        run: cargo test --features wasm --test smuggling --test http_semantics --test timeouts --test ws_policy --test h1_tls --test wasm_caps --test ctl_atoms
+      - name: h2spec
+        run: |
+          set -euo pipefail
+          H2SPEC_VER=2.6.0
+          curl -fsSL -o h2spec.tgz "https://github.com/summerwind/h2spec/releases/download/v${H2SPEC_VER}/h2spec_linux_amd64.tar.gz"
+          tar -xzf h2spec.tgz
+          chmod +x ./h2spec
+          (cd Code && cargo build --features proto --bin atomos-proto)
+          TMP=$(mktemp -d)
+          printf 'ok' > "$TMP/index.html"
+          cat >"$TMP/config.json" <<EOF
+          {"bind":"127.0.0.1:8090","static_root":"$TMP","memory_cap_bytes":67108864,"engine":"tokio","workers":1,"http2":true,"http3":false}
+          EOF
+          cat >"$TMP/rules.json" <<'EOF'
+          {"rules":[{"id":"s","module":"static","methods":["GET","HEAD","POST"],"include":["/*"],"exclude":[]}]}
+          EOF
+          Code/target/debug/atomos-proto --config "$TMP/config.json" --rules "$TMP/rules.json" &
+          PID=$!
+          trap 'kill $PID' EXIT
+          for i in $(seq 1 50); do
+            if (echo >/dev/tcp/127.0.0.1/8090) >/dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+          ./h2spec -h 127.0.0.1 -p 8090 --strict
+
+  bench:
+    if: github.event_name == 'schedule'
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - name: nightly bench harness
+        run: Code/bench/run.sh
