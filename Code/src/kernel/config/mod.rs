@@ -10,7 +10,7 @@ mod defaults;
 mod host;
 mod validate;
 
-pub use host::{HostFacts, runtime_dir};
+pub use host::{HostFacts, physical_cpus, runtime_dir};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {

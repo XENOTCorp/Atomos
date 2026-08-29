@@ -6,10 +6,7 @@ pub(crate) fn default_bind() -> String {
     "127.0.0.1:8090".into()
 }
 pub(crate) fn default_workers() -> u32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(2)
-        .max(1)
+    super::physical_cpus().max(1)
 }
 pub(crate) fn default_backlog() -> i32 {
     1024

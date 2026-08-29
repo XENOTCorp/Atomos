@@ -10,6 +10,6 @@
 - Absolute-form is normalized to origin-form before the ruleset. `GET http://127.0.0.1/ HTTP/1.1` plus matching `Host: 127.0.0.1` is 200 and serves the static index.
 
 - Sync `Module::handle` cannot be cancelled. `module_timeout_ms` is a deadline started on the worker; 504 is best-effort after return. Over-budget modules are a contract violation. Wasm fuel, epoch, and the 16 MiB memory limiter map to 504.
-- Wasm instances have no WASI filesystem or sockets on the linker. That is the capability story today.
+- Wasm instances have no WASI filesystem or sockets on the linker.
 
 See `Code/tests/smuggling.rs`, `Code/tests/timeouts.rs`, `Code/tests/h1_tls.rs`, `Code/tests/wasm_caps.rs`, and `Code/tests/ws_policy.rs`.

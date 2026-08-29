@@ -219,6 +219,8 @@ fn worker(
     let mut enc = Vec::with_capacity(OUT_CAP);
     let mut listener = Some(listener);
     let mut drain_since: Option<Instant> = None;
+    let mut last_reap = Instant::now();
+    let tls_on = tls_cfg.is_some();
 
     // 200 ms poll timeout doubles as the stop-poll cadence (shutdown
     // latency <= 200 ms), matching the pre-FDS engine.
@@ -259,7 +261,13 @@ fn worker(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        reap_idle(&mut reactor, &mut streams, &router, &mut enc);
+        // Origin reaped only on poll timeout. Under load poll never
+        // times out, so Slowloris would stick. Cadence matches the
+        // 200 ms poll: do not walk CONN_CAP on every request.
+        if n == 0 || last_reap.elapsed().as_millis() >= 200 {
+            reap_idle(&mut reactor, &mut streams, &router, &mut enc);
+            last_reap = Instant::now();
+        }
         if n == 0 {
             continue;
         }
@@ -287,11 +295,14 @@ fn worker(
                         Err(_) => drop_fd = true,
                     }
                 }
-                let busy = !c.out.is_empty() || c.pending_sf.is_some() || tlsio::wants_write(c);
+                let tls_w = tls_on && tlsio::wants_write(c);
+                let busy = !c.out.is_empty() || c.pending_sf.is_some() || tls_w;
                 if busy && (ev.writable || ev.readable) {
                     if flush_out(c).is_err() {
                         drop_fd = true;
-                    } else if c.out.is_empty() && c.pending_sf.is_none() && !tlsio::wants_write(c)
+                    } else if c.out.is_empty()
+                        && c.pending_sf.is_none()
+                        && !(tls_on && tlsio::wants_write(c))
                     {
                         let _ = reactor.modify(c.stream.as_raw_fd(), token, Interest::Readable);
                     } else {
@@ -403,11 +414,20 @@ fn queue_bytes(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<()> {
             ));
         }
     }
-    match tlsio::write_plain(c, bytes) {
-        Ok(n) if n == bytes.len() => Ok(()),
-        Ok(n) => park_out(c, &bytes[n..]),
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => park_out(c, bytes),
-        Err(e) => Err(e),
+    if c.tls.is_none() {
+        match c.stream.writev(&[bytes]) {
+            Ok(n) if n == bytes.len() => Ok(()),
+            Ok(n) => park_out(c, &bytes[n..]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => park_out(c, bytes),
+            Err(e) => Err(e),
+        }
+    } else {
+        match tlsio::write_plain(c, bytes) {
+            Ok(n) if n == bytes.len() => Ok(()),
+            Ok(n) => park_out(c, &bytes[n..]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => park_out(c, bytes),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -415,35 +435,43 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
     let mut tmp = [0u8; 4096];
     let mut eof = false;
     loop {
-        match tlsio::read_plain(c, &mut tmp) {
-            Ok(None) => break,
-            Ok(Some(0)) => {
-                if c.tls.as_ref().is_some_and(|t| t.is_handshaking()) {
-                    return Ok(true);
+        let n = if c.tls.is_none() {
+            match c.stream.read(&mut tmp) {
+                Ok(0) => {
+                    eof = true;
+                    break;
                 }
-                eof = true;
-                break;
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => return Ok(false),
             }
-            Ok(Some(n)) => {
-                c.last_rw = Instant::now();
-                if c.hdr_t0.is_none() {
-                    c.hdr_t0 = Some(c.last_rw);
+        } else {
+            match tlsio::read_plain(c, &mut tmp) {
+                Ok(None) => break,
+                Ok(Some(0)) => {
+                    if c.tls.as_ref().is_some_and(|t| t.is_handshaking()) {
+                        return Ok(true);
+                    }
+                    eof = true;
+                    break;
                 }
-                let max = buf_capacity_for(
-                    router.cfg.max_header_bytes,
-                    router.cfg.max_body_bytes,
-                );
-                if !append_bounded(&mut c.buf, &tmp[..n], max) {
-                    return Ok(false);
-                }
-                // Hot state: sequence + activity on every step (the
-                // FDS hot/cold split in action).
-                let hot = &mut c.slot.conn_mut().hot;
-                hot.seq = hot.seq.wrapping_add(n as u32);
-                hot.last_activity = now_ticks();
+                Ok(Some(n)) => n,
+                Err(_) => return Ok(false),
             }
-            Err(_) => return Ok(false),
+        };
+        c.last_rw = Instant::now();
+        if c.hdr_t0.is_none() {
+            c.hdr_t0 = Some(c.last_rw);
         }
+        let max = buf_capacity_for(router.cfg.max_header_bytes, router.cfg.max_body_bytes);
+        if !append_bounded(&mut c.buf, &tmp[..n], max) {
+            return Ok(false);
+        }
+        // Hot state: sequence + activity on every step (the
+        // FDS hot/cold split in action).
+        let hot = &mut c.slot.conn_mut().hot;
+        hot.seq = hot.seq.wrapping_add(n as u32);
+        hot.last_activity = now_ticks();
         if c.buf.len() - c.pos > router.cfg.max_header_bytes + router.cfg.max_body_bytes {
             return Ok(false);
         }

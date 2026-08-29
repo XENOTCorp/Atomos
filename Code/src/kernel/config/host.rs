@@ -6,6 +6,39 @@ use serde::Deserialize;
 use super::Config;
 use crate::error::ServeError;
 
+/// Physical cores from topology, capped by the process CPU set.
+/// SMT siblings share a core; pinning one worker per sibling on a
+/// dual-core laptop loses the cached GET path to contention.
+pub fn physical_cpus() -> u32 {
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(2)
+        .max(1);
+    let mut cores = std::collections::BTreeSet::new();
+    for i in 0..256u32 {
+        let path = format!("/sys/devices/system/cpu/cpu{i}/topology/thread_siblings_list");
+        let Ok(s) = std::fs::read_to_string(&path) else {
+            if i == 0 {
+                break;
+            }
+            continue;
+        };
+        let id = s
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|x| !x.is_empty())
+            .and_then(|x| x.parse::<u32>().ok());
+        if let Some(id) = id {
+            cores.insert(id);
+        }
+    }
+    let phys = cores.len() as u32;
+    if phys == 0 {
+        logical
+    } else {
+        phys.min(logical)
+    }
+}
+
 /// `$XDG_RUNTIME_DIR`, else `/run/user/<uid>`, else `/tmp`.
 pub fn runtime_dir() -> PathBuf {
     if let Ok(d) = std::env::var("XDG_RUNTIME_DIR") {
@@ -67,5 +100,13 @@ impl Config {
         if let Some(ref ports) = h.refuse_ports {
             self.refuse_ports = ports.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn physical_cpus_at_least_one() {
+        assert!(super::physical_cpus() >= 1);
     }
 }

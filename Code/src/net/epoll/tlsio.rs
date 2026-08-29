@@ -47,6 +47,7 @@ pub(crate) fn alpn_is_h1(tls: &ServerConnection) -> bool {
     }
 }
 
+#[inline(always)]
 pub(crate) fn wants_write(c: &Conn<'_>) -> bool {
     c.tls.as_ref().is_some_and(|t| t.wants_write())
 }
@@ -69,6 +70,7 @@ pub(crate) fn flush_tls(c: &mut Conn<'_>) -> io::Result<()> {
 /// Pump TLS records. `Ok(None)` = wait. `Ok(Some(0))` = EOF after
 /// handshake. `Ok(Some(n))` = plaintext bytes in `tmp`. Handshake
 /// incomplete returns `Ok(None)` (not EOF).
+#[inline(always)]
 pub(crate) fn read_plain(c: &mut Conn<'_>, tmp: &mut [u8]) -> io::Result<Option<usize>> {
     let Some(tls) = c.tls.as_mut() else {
         return match c.stream.read(tmp) {
@@ -113,6 +115,7 @@ pub(crate) fn read_plain(c: &mut Conn<'_>, tmp: &mut [u8]) -> io::Result<Option<
     }
 }
 
+#[inline(always)]
 pub(crate) fn write_plain(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<usize> {
     let Some(tls) = c.tls.as_mut() else {
         return c.stream.writev(&[bytes]);

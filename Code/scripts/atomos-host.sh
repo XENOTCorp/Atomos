@@ -23,6 +23,23 @@ nproc_n() {
   grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1
 }
 
+# Physical cores (not SMT siblings). Pinning one worker per sibling
+# on a 2c/4t box loses the cached GET path to contention.
+physical_n() {
+  local cores socks logical p
+  logical=$(nproc_n)
+  cores=$(awk '/^cpu cores/{print $4; exit}' /proc/cpuinfo)
+  socks=$(awk '/^physical id/{print $4}' /proc/cpuinfo | sort -u | wc -l)
+  if [[ -n "$cores" && "$cores" -gt 0 && "$socks" -gt 0 ]]; then
+    p=$((cores * socks))
+    if [[ $p -gt 0 && $p -le $logical ]]; then
+      echo "$p"
+      return
+    fi
+  fi
+  echo "$logical"
+}
+
 l3_bytes() {
   local kib=0
   if [[ -r /sys/devices/system/cpu/cpu0/cache/index3/size ]]; then
@@ -66,13 +83,14 @@ refuse_json_array() {
 }
 
 host_json() {
-  local n l3
+  local n w l3
   n=$(nproc_n)
+  w=$(physical_n)
   l3=$(l3_bytes)
   cat <<EOF
 {
   "nproc": $n,
-  "workers": $n,
+  "workers": $w,
   "cpu_pin": true,
   "cache_bytes": $l3,
   "cache_entries": 4096,

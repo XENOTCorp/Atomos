@@ -5,7 +5,7 @@
 //!   cargo run --release --example first_app -- 127.0.0.1:8090
 //!
 //! Notes live as an ArcSwap snapshot. GET never takes a mutex. POST serializes
-//! writers with a mutex, then one store. Pinned epoll H1 workers (SOTA path).
+//! writers with a mutex, then one store. Pinned epoll H1 workers.
 //! Ports to skip come from host.json `refuse_ports`, not from this file.
 
 use std::path::{Path, PathBuf};

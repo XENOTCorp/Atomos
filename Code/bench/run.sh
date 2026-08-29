@@ -7,7 +7,7 @@ BENCH="$CODE/bench"
 PAY="$BENCH/payloads"
 OUT="$BENCH/out"
 DATE=$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p "$OUT"
+mkdir -p "$OUT" /tmp/atomos-nginx-body /tmp/atomos-nginx-proxy /tmp/atomos-nginx-fcgi /tmp/atomos-nginx-uwsgi /tmp/atomos-nginx-scgi
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 1; }; }
 need wrk
@@ -29,7 +29,7 @@ if [[ ! -x $PROTO ]]; then
 fi
 
 TMP=$(mktemp -d)
-trap 'kill $(jobs -p) 2>/dev/null || true; nginx -c "$TMP/nginx.conf" -s stop 2>/dev/null || true; killall h2o 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true; nginx -e /tmp/atomos-bench-nginx.err -c "$TMP/nginx.conf" -s stop 2>/dev/null || true; killall h2o 2>/dev/null || true; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/www"
 cp -a "$PAY/." "$TMP/www/"
 ln -sfn 11b "$TMP/www/index.html" 2>/dev/null || cp "$PAY/11b" "$TMP/www/index.html"
@@ -41,14 +41,34 @@ wrk_rps() {
 
 kill_port() {
   local p=$1
-  fuser -k "${p}/tcp" 2>/dev/null || true
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${p}/tcp" 2>/dev/null || true
+  else
+    local pids
+    pids=$(ss -H -ltnp "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
+    if [[ -n "${pids:-}" ]]; then
+      kill $pids 2>/dev/null || true
+    fi
+  fi
   sleep 0.3
 }
+
+# Physical cores: SMT siblings contend on the cached GET path.
+WORKERS=$(awk '/^cpu cores/{print $4; exit}' /proc/cpuinfo)
+SOCKS=$(awk '/^physical id/{print $4}' /proc/cpuinfo | sort -u | wc -l)
+if [[ -n "$WORKERS" && "$WORKERS" -gt 0 && "$SOCKS" -gt 0 ]]; then
+  WORKERS=$((WORKERS * SOCKS))
+else
+  WORKERS=$(nproc)
+fi
+if [[ -f "$CODE/.atomos/host.json" ]]; then
+  export ATOMOS_HOST="$CODE/.atomos/host.json"
+fi
 
 # --- Atomos H1 plaintext ---
 kill_port 18090
 cat >"$TMP/atomos-h1.json" <<EOF
-{"bind":"127.0.0.1:18090","static_root":"$TMP/www","memory_cap_bytes":67108864,"engine":"epoll","workers":4,"http2":false,"http3":false,"allow_non_loopback":false}
+{"bind":"127.0.0.1:18090","static_root":"$TMP/www","memory_cap_bytes":67108864,"engine":"epoll","workers":$WORKERS,"http2":false,"http3":false,"allow_non_loopback":false}
 EOF
 cat >"$TMP/rules.json" <<'EOF'
 {"rules":[{"id":"s","module":"static","methods":["GET","HEAD"],"include":["/*"],"exclude":[]}]}
@@ -68,7 +88,7 @@ d = pathlib.Path(sys.argv[1])
 subprocess.check_call(["openssl","req","-x509","-newkey","rsa:2048","-keyout",str(d/"key.pem"),"-out",str(d/"cert.pem"),"-days","1","-nodes","-subj","/CN=localhost"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 PY
 cat >"$TMP/atomos-proto.json" <<EOF
-{"bind":"127.0.0.1:18091","static_root":"$TMP/www","memory_cap_bytes":67108864,"engine":"tokio","workers":4,"http2":true,"http3":false,"tls_cert":"$TMP/cert.pem","tls_key":"$TMP/key.pem"}
+{"bind":"127.0.0.1:18091","static_root":"$TMP/www","memory_cap_bytes":67108864,"engine":"tokio","workers":$WORKERS,"http2":true,"http3":false,"tls_cert":"$TMP/cert.pem","tls_key":"$TMP/key.pem"}
 EOF
 "$PROTO" --config "$TMP/atomos-proto.json" --rules "$TMP/rules.json" >/tmp/atomos-bench-proto.log 2>&1 &
 sleep 0.8
@@ -85,12 +105,12 @@ kill_port 18091
 # --- nginx ---
 kill_port 18092
 sed "s|ROOT|$TMP/www|g" "$BENCH/nginx.conf" >"$TMP/nginx.conf"
-nginx -c "$TMP/nginx.conf"
+nginx -e /tmp/atomos-bench-nginx.err -c "$TMP/nginx.conf"
 sleep 0.3
 N11=$(wrk_rps http://127.0.0.1:18092/11b)
 N64=$(wrk_rps http://127.0.0.1:18092/64k)
 N1M=$(wrk_rps http://127.0.0.1:18092/1m)
-nginx -c "$TMP/nginx.conf" -s stop || true
+nginx -e /tmp/atomos-bench-nginx.err -c "$TMP/nginx.conf" -s stop || true
 kill_port 18092
 
 # --- h2o ---
