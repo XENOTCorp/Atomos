@@ -1,30 +1,39 @@
 #!/usr/bin/env bash
-# Derive cargo/rustc CPU flags from this machine's /proc/cpuinfo.
-# No hardcoded microarch name (no "broadwell"). Uses target-cpu=native
-# plus explicit AVX features that are present, and -avx512* / -avx10*
-# when the CPU does not advertise them (so we never emit zmm here).
+# Derive cargo/rustc flags from this Linux host.
+# No microarch name. No hardcoded triple. Linker is detected.
 #
 # Usage:
 #   scripts/cpu-rustflags.sh              # print rustc -C args
-#   scripts/cpu-rustflags.sh features     # print detected avx* flags
+#   scripts/cpu-rustflags.sh features     # print detected SIMD names
 #   eval "$(scripts/cpu-rustflags.sh export)"
 #   scripts/cpu-rustflags.sh write [REPO] # rewrite REPO/.cargo/config.toml
-#   scripts/cpu-rustflags.sh cargo test --offline
+#   scripts/cpu-rustflags.sh cargo test
 #
-# Environment RUSTFLAGS replaces .cargo/config.toml rustflags. Unset a
-# host-wide mold RUSTFLAGS before relying on this file.
+# Optional environment:
+#   ATOMOS_CC   C compiler for rustc linker= (cc, gcc, clang)
+#   ATOMOS_LD   lld, mold, or empty for the compiler default
+#   EXTRA_RUSTFLAGS  appended by the export command
+#
+# Host RUSTFLAGS overrides .cargo/config.toml. Unset it before cargo.
 
 set -euo pipefail
 
+is_x86() {
+  case "$(uname -m)" in
+    x86_64|amd64|i386|i686) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 cpuinfo_flags() {
-  if [[ -r /proc/cpuinfo ]]; then
-    grep -m1 -E '^flags[[:space:]]*:' /proc/cpuinfo \
-      | sed 's/^[^:]*:[[:space:]]*//' \
-      | tr '[:upper:]' '[:lower:]'
-    return 0
+  if [[ ! -r /proc/cpuinfo ]]; then
+    echo "cpu-rustflags: cannot read /proc/cpuinfo" >&2
+    return 1
   fi
-  echo "cpu-rustflags: cannot read /proc/cpuinfo" >&2
-  return 1
+  # x86 uses "flags:"; aarch64 uses "Features:".
+  grep -m1 -E '^(flags|Features)[[:space:]]*:' /proc/cpuinfo \
+    | sed 's/^[^:]*:[[:space:]]*//' \
+    | tr '[:upper:]' '[:lower:]'
 }
 
 has_flag() {
@@ -33,8 +42,6 @@ has_flag() {
   [[ "$hay" == *"$needle"* ]]
 }
 
-# Linux cpuinfo name -> rustc target-feature name. Only AVX family.
-# avx10 is reported as avx10.1 / avx10_1 depending on kernel; we accept both.
 AVX512_RUSTC=(
   avx512f
   avx512cd
@@ -62,7 +69,49 @@ linux_has_avx10() {
   has_flag avx10.1 "$flags" || has_flag avx10_1 "$flags" || has_flag avx10 "$flags"
 }
 
+detect_cc() {
+  if [[ -n "${ATOMOS_CC:-}" ]]; then
+    echo "$ATOMOS_CC"
+    return 0
+  fi
+  local c
+  for c in cc gcc clang; do
+    if command -v "$c" >/dev/null 2>&1; then
+      echo "$c"
+      return 0
+    fi
+  done
+  echo "cpu-rustflags: need cc, gcc, or clang" >&2
+  return 1
+}
+
+detect_ld() {
+  if [[ -n "${ATOMOS_LD+x}" ]]; then
+    echo "${ATOMOS_LD}"
+    return 0
+  fi
+  if command -v ld.lld >/dev/null 2>&1 || command -v lld >/dev/null 2>&1; then
+    echo lld
+    return 0
+  fi
+  if command -v mold >/dev/null 2>&1; then
+    echo mold
+    return 0
+  fi
+  echo ""
+}
+
+rustc_host() {
+  if ! command -v rustc >/dev/null 2>&1; then
+    return 0
+  fi
+  rustc -vV 2>/dev/null | awk '/^host:/{print $2; exit}'
+}
+
 detect_avx() {
+  if ! is_x86; then
+    return 0
+  fi
   local flags present=()
   flags=$(cpuinfo_flags)
   if has_flag avx "$flags"; then present+=(avx); fi
@@ -74,7 +123,6 @@ detect_avx() {
         present+=("$f")
       fi
     done
-    # avx512f is the gate; if only the umbrella bit exists, still enable f.
     local joined=" ${present[*]} "
     if [[ "$joined" != *" avx512f "* ]]; then
       present+=(avx512f)
@@ -87,13 +135,17 @@ detect_avx() {
 }
 
 target_feature_csv() {
+  if ! is_x86; then
+    echo ""
+    return 0
+  fi
   local flags present=() f
   flags=$(cpuinfo_flags)
   mapfile -t present < <(detect_avx)
 
   local parts=()
   for f in "${present[@]}"; do
-    parts+=("+$f")
+    [[ -n "$f" ]] && parts+=("+$f")
   done
 
   if ! linux_has_avx512 "$flags"; then
@@ -102,7 +154,6 @@ target_feature_csv() {
     done
   fi
   if ! linux_has_avx10 "$flags"; then
-    # Only names rustc accepts without "unknown feature" noise.
     parts+=("-avx10.1" "-avx10.2")
   fi
 
@@ -110,41 +161,45 @@ target_feature_csv() {
   echo "${parts[*]}"
 }
 
-rustc_c_args() {
-  local feat
+# Fill nameref array with rustc -C tokens: flag then value.
+rustc_c_pairs() {
+  local -n _out=$1
+  _out=()
+  local feat ld
   feat=$(target_feature_csv)
-  printf '%s\n' \
-    "-C" "target-cpu=native" \
-    "-C" "target-feature=${feat}" \
-    "-C" "link-arg=-fuse-ld=lld" \
-    "-C" "link-arg=-Wl,-z,relro,-z,now,-z,noexecstack"
+  ld=$(detect_ld)
+  _out+=("-C" "target-cpu=native")
+  if [[ -n "$feat" ]]; then
+    _out+=("-C" "target-feature=${feat}")
+  fi
+  if [[ -n "$ld" ]]; then
+    _out+=("-C" "link-arg=-fuse-ld=${ld}")
+  fi
+  _out+=("-C" "link-arg=-Wl,-z,relro,-z,now,-z,noexecstack")
 }
 
 toml_rustflags_array() {
-  local feat
-  feat=$(target_feature_csv)
-  cat <<EOF
-[
-  "-C", "target-cpu=native",
-  "-C", "target-feature=${feat}",
-  "-C", "link-arg=-fuse-ld=lld",
-  "-C", "link-arg=-Wl,-z,relro,-z,now,-z,noexecstack",
-]
-EOF
+  local pairs=() i
+  rustc_c_pairs pairs
+  printf '[\n  '
+  for i in "${!pairs[@]}"; do
+    if [[ $i -gt 0 ]]; then
+      printf ', '
+    fi
+    printf '"%s"' "${pairs[$i]}"
+  done
+  printf '\n]\n'
 }
 
 export_line() {
-  local args=()
-  mapfile -t args < <(rustc_c_args)
-  local joined=""
-  local a
-  for a in "${args[@]}"; do
+  local pairs=() joined="" a
+  rustc_c_pairs pairs
+  for a in "${pairs[@]}"; do
     if [[ -n "$joined" ]]; then
       joined+=" "
     fi
     joined+="$a"
   done
-  # Keep existing non-CPU RUSTFLAGS only if the caller passed EXTRA_RUSTFLAGS.
   printf "export RUSTFLAGS='%s%s'\n" "$joined" "${EXTRA_RUSTFLAGS:+ $EXTRA_RUSTFLAGS}"
 }
 
@@ -159,33 +214,45 @@ write_cargo_config() {
   fi
   local dest="$root/.cargo/config.toml"
   mkdir -p "$root/.cargo"
-  local present
-  present=$(detect_avx | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  local present host cc ld simd=()
+  mapfile -t simd < <(detect_avx)
+  present="${simd[*]}"
   if [[ -z "$present" ]]; then
-    present="(none)"
+    if is_x86; then
+      present="(none)"
+    else
+      present="native ($(uname -m))"
+    fi
   fi
+  host=$(rustc_host)
+  cc=$(detect_cc)
+  ld=$(detect_ld)
   local arr
   arr=$(toml_rustflags_array)
-  cat >"$dest" <<EOF
-# Generated by scripts/cpu-rustflags.sh from /proc/cpuinfo on $(hostname 2>/dev/null || uname -n) ($(date -u +%Y-%m-%dT%H:%MZ)).
-# Detected AVX: ${present}
-# Uses target-cpu=native: do not hardcode a microarch name.
-# Host RUSTFLAGS overrides this file; unset it for these flags to apply.
-
-[build]
-rustflags = ${arr}
-
-[target.x86_64-unknown-linux-gnu]
-linker = "cc"
-rustflags = ${arr}
-EOF
+  {
+    echo "# Generated by scripts/cpu-rustflags.sh on $(date -u +%Y-%m-%dT%H:%MZ)."
+    echo "# Host uname: $(uname -s) $(uname -m). SIMD: ${present}."
+    echo "# linker=${cc} ld=${ld:-compiler-default} triple=${host:-unknown}."
+    echo "# Git ignores this file. Run scripts/compile.sh on each machine."
+    echo
+    echo "[build]"
+    echo "rustflags = ${arr}"
+    if [[ -n "$host" ]]; then
+      echo
+      echo "[target.${host}]"
+      echo "linker = \"${cc}\""
+      echo "rustflags = ${arr}"
+    fi
+  } >"$dest"
   echo "wrote $dest"
 }
 
 cmd="${1:-print}"
 case "$cmd" in
   print|"")
-    rustc_c_args | paste -sd' ' -
+    pairs=()
+    rustc_c_pairs pairs
+    printf '%s ' "${pairs[@]}"
     echo
     ;;
   features)
@@ -199,7 +266,6 @@ case "$cmd" in
     ;;
   cargo)
     shift
-    # shellcheck disable=SC1090
     eval "$(export_line)"
     exec cargo "$@"
     ;;

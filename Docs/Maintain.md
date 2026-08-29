@@ -31,19 +31,21 @@ license = "Apache-2.0"
 7. Strip U+2014 and U+2013 from the copied comments if the FDS source still uses them.
 8. Run `cd Code && cargo test`.
 
-## Generate rustflags
+## Generate device files
 
-`Code/scripts/cpu-rustflags.sh` writes `Code/.cargo/config.toml` from `/proc/cpuinfo`. Git ignores that file.
+From the repository root:
+
+```
+./compile.sh write
+```
+
+`compile.sh` reads this machine. It writes `Code/.cargo/config.toml` and `Code/.atomos/host.json`. Git ignores both files. Do not copy them between hosts.
+
+Direct scripts, same result:
 
 ```
 cd Code
 scripts/cpu-rustflags.sh write .
-```
-
-`Code/scripts/atomos-host.sh` writes host facts. It sets `cache_bytes` to L3 size in `.atomos/host.json`. Git ignores `.atomos/`.
-
-```
-cd Code
 scripts/atomos-host.sh write .
 ```
 
@@ -59,4 +61,4 @@ cargo clippy --all-targets -- -D warnings
 
 ## Layout
 
-Root metadata: `README.md`, `LICENSE`, `.gitignore`. Content directories: `Code/` and `Docs/`.
+Root metadata: `README.md`, `LICENSE`, `.gitignore`, `compile.sh`. Content directories: `Code/` and `Docs/`.

@@ -8,3 +8,7 @@ Two engines share one kernel:
 - `atomos-proto` serves HTTP/1.1, HTTP/2, HTTP/3, and TLS on tokio.
 
 FDS crates live in `Code/FDS`.
+
+Build on the target host with `./compile.sh`. See [Compile.md](Compile.md).
+
+Planes, pre/post hooks, and hot-swap: [Architecture.md](Architecture.md).

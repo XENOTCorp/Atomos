@@ -5,7 +5,8 @@ Atomos is an HTTP kernel. A consumer registers modules. A ruleset selects one mo
 | Page | Content |
 |---|---|
 | [Overview](Overview.md) | What the kernel does. Two engines. |
-| [Architecture](Architecture.md) | Four planes. Request path. Pinning. |
+| [Architecture](Architecture.md) | Planes. Pre/post. Hot-swap. Charts. |
+| [Compile](Compile.md) | `compile.sh`. Device files. Portable Linux build. |
 | [Requests](Requests.md) | `In`, `Out`, body types, cache directives. |
 | [Rules](Rules.md) | Exact and prefix. exclude. Overlap is an error. |
 | [Modules](Modules.md) | `Module` trait. pre and post. |

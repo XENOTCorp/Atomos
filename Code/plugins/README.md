@@ -8,7 +8,7 @@ Drop `*.json` manifests in `plugin_dir` (config). Then call `plugin::load_dir`.
 | `wasm` | Component at `path` implementing `wit/atomos-module.wit` |
 | `native` | Refused. `.so` is not a sandbox |
 
-Hot-swap: `Router::insert` is `ArcSwap` for builtin modules. Wasm swap lands when a wasmtime backend is linked. Cache-hit GET never calls a plugin.
+Hot-swap: `Router::insert` is `ArcSwap` for builtin modules. `plugin::reload` re-reads the directory. Wasm swap lands when a wasmtime backend is linked. Cache-hit GET never calls a plugin. Native `.so` is refused.
 
 Example builtin:
 

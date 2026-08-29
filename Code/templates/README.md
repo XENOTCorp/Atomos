@@ -15,6 +15,6 @@ Copy these files into a consumer crate. The Atomos package does not compile them
 | `rules.json` | Disjoint include/exclude and optional header rule |
 | `error.html` | `{{code}}` `{{phrase}}` `{{detail}}` |
 
-Hot-reload of `.rs` is not supported. Reload JSON rules with `refresh-endpoints` (`rules.reload` atom).
+Hot-reload of `.rs` is not supported. Reload JSON rules with `refresh-endpoints` (`rules.reload` atom). See [Docs/Wiki/Architecture.md](../../Docs/Wiki/Architecture.md).
 
 Worked first app: [Docs/Wiki/Examples.md](../../Docs/Wiki/Examples.md) and `examples/first_app.rs`.

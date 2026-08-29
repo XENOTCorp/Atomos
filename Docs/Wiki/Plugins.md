@@ -8,7 +8,9 @@ Four planes include a plugin surface. Plugins declare a JSON manifest in `plugin
 | `wasm` | Component at `path` implementing `Code/wit/atomos-module.wit` |
 | `native` | Refused. `.so` is not a sandbox |
 
-Cache-hit GET never calls a plugin.
+Hot-swap: `Router::insert` is `ArcSwap` for named modules. `plugin::reload` reads `plugin_dir` again. Cache-hit GET never calls a plugin. Native `.so` is refused.
+
+See [Architecture.md](Architecture.md).
 
 Example builtin:
 

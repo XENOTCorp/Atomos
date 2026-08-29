@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Device facts for Atomos. Reads /proc only. Never names a microarch.
 #
+# Prefer scripts/compile.sh. That script writes rustflags and this overlay.
+#
 #   scripts/atomos-host.sh              # print host.json
-#   scripts/atomos-host.sh write [DIR]  # .cargo/config.toml + DIR/.atomos/host.json
+#   scripts/atomos-host.sh write [DIR]  # rustflags + DIR/.atomos/host.json
 #   scripts/atomos-host.sh cargo …      # cpu-rustflags + cargo
 #
 # Optional: ATOMOS_REFUSE_PORTS=8082,80  (comma-separated)
 # Optional: ATOMOS_HOST=/path/to/host.json  (runtime overlay)
+# Git ignores .atomos/. Do not copy host.json to another machine.
 
 set -euo pipefail
 

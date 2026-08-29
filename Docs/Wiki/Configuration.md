@@ -26,6 +26,8 @@ Important fields:
 | `pre_module` / `post_module` | Optional hooks. |
 | `landlock` / `seccomp` | Post-bind jail. Linux. |
 
-Host facts come from `.atomos/host.json`. `Code/scripts/atomos-host.sh` writes workers, L3-sized `cache_bytes`, and `refuse_ports`.
+Host facts come from `.atomos/host.json`. `./compile.sh` writes that file. Workers follow `nproc`. `cache_bytes` follows L3 size. `refuse_ports` follows `ATOMOS_REFUSE_PORTS`.
+
+Do not copy `.atomos/host.json` to another machine. See [Compile.md](Compile.md).
 
 Example hard bounds: RSS cap 64 MiB in examples, JSON depth 32, body 262144 bytes, response cache 4096 entries or 16 MiB.
