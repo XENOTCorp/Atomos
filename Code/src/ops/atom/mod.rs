@@ -37,7 +37,11 @@ pub struct AtomCtx {
     pub started: Instant,
     pub allow_write: bool,
     pub stop: Arc<LineAtomicU8>,
+    /// 1 = stop accept, wait `worker_shutdown_timeout_ms`, abort slots.
+    pub drain: Arc<LineAtomicU8>,
     pub cache: Arc<ResponseCache>,
+    /// One line per effectful atom: `ts, atom, key_id, old_hash, new_hash`.
+    pub audit_path: PathBuf,
 }
 
 impl AtomCtx {
@@ -50,7 +54,9 @@ impl AtomCtx {
             started: Instant::now(),
             allow_write: true,
             stop: Arc::new(LineAtomicU8::new(0)),
+            drain: Arc::new(LineAtomicU8::new(0)),
             cache: Arc::new(ResponseCache::new(8, 64 * 1024)),
+            audit_path: PathBuf::new(),
         }
     }
 
@@ -76,6 +82,8 @@ pub fn dispatch(ctx: &AtomCtx, name: &str, input: Value) -> Result<Value, AtomEr
         }
         "rules.reload" => rules_reload(ctx),
         "cache.purge" => cache_purge(ctx, input),
+        "server.drain" => server_drain(ctx),
+        "audit.append" => audit_append(ctx, input),
         "tunnel.apply" => Ok(json!({"ok": false, "error": "unconfigured"})),
         _ => Err(AtomError::Unknown(name.into())),
     }

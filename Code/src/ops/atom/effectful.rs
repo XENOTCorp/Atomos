@@ -1,7 +1,10 @@
 //! Effectful atoms. World write through files and signal.
+use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use super::pure::signal_get;
 use super::AtomCtx;
@@ -9,15 +12,79 @@ use crate::align::{STATE_OFF, STATE_ON};
 use crate::error::AtomError;
 use crate::rules::Ruleset;
 
+/// One audit line: `ts, atom, key_id, old_hash, new_hash`.
+pub(crate) fn audit_line(ctx: &AtomCtx, atom: &str, key_id: &str, old_hash: &str, new_hash: &str) {
+    if ctx.audit_path.as_os_str().is_empty() {
+        return;
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("{ts}, {atom}, {key_id}, {old_hash}, {new_hash}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ctx.audit_path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn hash_bytes(b: &[u8]) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
+pub(crate) fn server_drain(ctx: &AtomCtx) -> Result<Value, AtomError> {
+    if !ctx.allow_write {
+        return Err(AtomError::PureActuate);
+    }
+    let old = ctx.drain.v.load(Ordering::Acquire);
+    ctx.drain.v.store(1, Ordering::Release);
+    audit_line(ctx, "server.drain", "listen", &old.to_string(), "1");
+    Ok(json!({ "ok": true }))
+}
+
+pub(crate) fn audit_append(ctx: &AtomCtx, input: Value) -> Result<Value, AtomError> {
+    if !ctx.allow_write {
+        return Err(AtomError::PureActuate);
+    }
+    let atom = input
+        .get("atom")
+        .and_then(|v| v.as_str())
+        .unwrap_or("audit.append");
+    let key_id = input
+        .get("key_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let old_hash = input
+        .get("old_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let new_hash = input
+        .get("new_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    audit_line(ctx, atom, key_id, old_hash, new_hash);
+    Ok(json!({ "ok": true }))
+}
+
 pub(crate) fn cache_purge(ctx: &AtomCtx, input: Value) -> Result<Value, AtomError> {
     if !ctx.allow_write {
         return Err(AtomError::PureActuate);
     }
-    if let Some(id) = input.get("id").and_then(|v| v.as_str()) {
-        ctx.cache.invalidate_named(id);
-    } else {
+    let key = input
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*");
+    if key == "*" {
         ctx.cache.invalidate();
+    } else {
+        ctx.cache.invalidate_named(key);
     }
+    audit_line(ctx, "cache.purge", key, "cache", "empty");
     Ok(json!({ "ok": true }))
 }
 
@@ -27,7 +94,9 @@ pub(crate) fn rules_reload(ctx: &AtomCtx) -> Result<Value, AtomError> {
     }
     let raw = std::fs::read(&ctx.rules_path)?;
     let rs = Ruleset::parse(&raw).map_err(|e| AtomError::Json(e.to_string().into_boxed_str()))?;
+    let newh = hash_bytes(&raw);
     ctx.rules.store(Arc::new(rs));
+    audit_line(ctx, "rules.reload", "rules", "-", &newh);
     Ok(json!({ "ok": true }))
 }
 
@@ -35,6 +104,7 @@ pub(crate) fn server_set(ctx: &AtomCtx, st: u8) -> Result<Value, AtomError> {
     if !ctx.allow_write {
         return Err(AtomError::PureActuate);
     }
+    let old = ctx.signal.v.load(Ordering::Acquire);
     ctx.signal.v.store(st, Ordering::Release);
     if st == STATE_OFF {
         ctx.stop.v.store(1, Ordering::Release);
@@ -42,6 +112,13 @@ pub(crate) fn server_set(ctx: &AtomCtx, st: u8) -> Result<Value, AtomError> {
     if st == STATE_ON {
         ctx.stop.v.store(0, Ordering::Release);
     }
+    audit_line(
+        ctx,
+        "server.set",
+        "signal",
+        &old.to_string(),
+        &st.to_string(),
+    );
     signal_get(ctx)
 }
 
@@ -83,6 +160,7 @@ pub(crate) fn json_crud(ctx: &AtomCtx, input: Value) -> Result<Value, AtomError>
         _ => return Err(AtomError::Input("op".into())),
     }
     atomic_write(Path::new(path), &doc)?;
+    audit_line(ctx, "json.crud", path, op, pointer);
     Ok(json!({ "ok": true }))
 }
 
@@ -103,6 +181,13 @@ pub(crate) fn settings_backup(ctx: &AtomCtx, input: Value) -> Result<Value, Atom
         return Err(AtomError::Bound);
     }
     atomic_write_bytes(Path::new(dest), &b)?;
+    audit_line(
+        ctx,
+        "settings.backup",
+        path,
+        &hash_bytes(&b),
+        dest,
+    );
     Ok(json!({ "ok": true, "bytes": b.len() }))
 }
 
