@@ -1,22 +1,35 @@
 //! Access log after encode. Effect adapter; not on the cache-hit predicate.
-//! Domain: one CLF-ish line per response. No `format!` on the hot path.
+//! Domain: one CLF-ish line per response. Never blocks the H1 worker.
 
-use std::cell::RefCell;
 use std::io::{self, Write};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::OnceLock;
 
 use crate::io::Method;
 use crate::num::{u16_to_slice, usize_to_slice};
 
-thread_local! {
-    /// When set, `emit` appends here instead of stderr (unit tests).
-    static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+static TX: OnceLock<SyncSender<Vec<u8>>> = OnceLock::new();
+
+fn sender() -> &'static SyncSender<Vec<u8>> {
+    TX.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(256);
+        std::thread::Builder::new()
+            .name("atomos-access-log".into())
+            .spawn(move || {
+                let mut err = io::stderr();
+                while let Ok(line) = rx.recv() {
+                    let _ = err.write_all(&line);
+                }
+            })
+            .ok();
+        tx
+    })
 }
 
 /// Write one line: `METHOD path status body_len\n` into `dst` (itoa, no format!).
 pub fn line(method: Method, path: &str, status: u16, body_len: usize, dst: &mut Vec<u8>) {
     dst.extend_from_slice(method.as_str().as_bytes());
     dst.push(b' ');
-    // Bound path copy so logging cannot grow without limit from a hostile URI.
     const MAX_PATH: usize = 2048;
     let p = path.as_bytes();
     let n = p.len().min(MAX_PATH);
@@ -31,27 +44,13 @@ pub fn line(method: Method, path: &str, status: u16, body_len: usize, dst: &mut 
     dst.push(b'\n');
 }
 
-/// Build a line then write to the capture buffer or stderr.
+/// Build a line then try-send to the flusher. A full or blocked pipe drops the line.
 pub fn emit(method: Method, path: &str, status: u16, body_len: usize) {
     let mut buf = Vec::with_capacity(64 + path.len().min(2048));
     line(method, path, status, body_len, &mut buf);
-    CAPTURE.with(|c| {
-        if let Some(v) = c.borrow_mut().as_mut() {
-            v.extend_from_slice(&buf);
-        } else {
-            let _ = io::stderr().write_all(&buf);
-        }
-    });
-}
-
-#[cfg(test)]
-pub fn capture_start() {
-    CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
-}
-
-#[cfg(test)]
-pub fn capture_take() -> Vec<u8> {
-    CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+    match sender().try_send(buf) {
+        Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+    }
 }
 
 #[cfg(test)]

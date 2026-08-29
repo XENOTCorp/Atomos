@@ -141,6 +141,44 @@ impl ResponseCache {
         })
     }
 
+    /// `If-None-Match` / `If-Modified-Since` against a cached `Out`.
+    pub fn not_modified(headers: &[(&str, &str)], cached: &Out) -> bool {
+        let mut inm = None;
+        let mut ims = None;
+        for (k, v) in headers {
+            if k.eq_ignore_ascii_case("if-none-match") {
+                inm = Some(*v);
+            }
+            if k.eq_ignore_ascii_case("if-modified-since") {
+                ims = Some(*v);
+            }
+        }
+        if let Some(tag) = inm {
+            if let Some((_, etag)) = cached
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("etag"))
+            {
+                let t = tag.trim();
+                if t == "*" || t == etag.as_ref() {
+                    return true;
+                }
+            }
+        }
+        if let Some(since) = ims {
+            if let Some((_, lm)) = cached
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("last-modified"))
+            {
+                if since.trim() == lm.as_ref() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn get(&self, method: Method, path: &str, query: &str) -> Option<Out> {
         let q = Lookup {
             method,

@@ -1,9 +1,22 @@
 //! Encode `Out` to one HTTP/1.1 response buffer. Criticality C1.
 
-use crate::io::Out;
+use crate::io::{Out, OutBody};
 use crate::num::{u16_to_slice, usize_to_slice};
 
 pub fn encode_response(out: &Out, dst: &mut Vec<u8>) {
+    encode(out, dst, false);
+}
+
+/// HEAD: same headers and Content-Length as GET. No body bytes.
+pub fn encode_head(out: &Out, dst: &mut Vec<u8>) {
+    encode(out, dst, true);
+}
+
+pub fn is_chunked(out: &Out) -> bool {
+    matches!(out.body, OutBody::Stream(_))
+}
+
+fn encode(out: &Out, dst: &mut Vec<u8>, head: bool) {
     dst.clear();
     dst.extend_from_slice(b"HTTP/1.1 ");
     let mut nb = [0u8; 24];
@@ -16,14 +29,17 @@ pub fn encode_response(out: &Out, dst: &mut Vec<u8>) {
         .unwrap_or_else(|| out.status.phrase());
     dst.extend_from_slice(phrase.as_bytes());
     dst.extend_from_slice(b"\r\n");
-    // `len()` not `as_bytes().len()`: a File body reports its size for
-    // Content-Length but contributes no bytes here (sendfile sends the
-    // body kernel-side).
-    let body_len = out.body.len();
-    dst.extend_from_slice(b"Content-Length: ");
-    let n = usize_to_slice(body_len, &mut nb);
-    dst.extend_from_slice(&nb[..n]);
-    dst.extend_from_slice(b"\r\nConnection: keep-alive\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n");
+    let stream = matches!(out.body, OutBody::Stream(_));
+    if stream {
+        dst.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    } else {
+        let body_len = out.body.len();
+        dst.extend_from_slice(b"Content-Length: ");
+        let n = usize_to_slice(body_len, &mut nb);
+        dst.extend_from_slice(&nb[..n]);
+        dst.extend_from_slice(b"\r\n");
+    }
+    dst.extend_from_slice(b"Connection: keep-alive\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n");
     for (k, v) in &out.headers {
         dst.extend_from_slice(k.as_bytes());
         dst.extend_from_slice(b": ");
@@ -31,9 +47,42 @@ pub fn encode_response(out: &Out, dst: &mut Vec<u8>) {
         dst.extend_from_slice(b"\r\n");
     }
     dst.extend_from_slice(b"\r\n");
-    // File bodies send their bytes via sendfile, not here (as_bytes is
-    // empty for them).
-    dst.extend_from_slice(out.body.as_bytes());
+    if !head && !stream {
+        dst.extend_from_slice(out.body.as_bytes());
+    }
+}
+
+/// `size\r\ndata\r\n` for one chunked body part.
+pub fn append_chunk(dst: &mut Vec<u8>, data: &[u8]) {
+    let mut hex = [0u8; 16];
+    let n = hex_usize(data.len(), &mut hex);
+    dst.extend_from_slice(&hex[..n]);
+    dst.extend_from_slice(b"\r\n");
+    dst.extend_from_slice(data);
+    dst.extend_from_slice(b"\r\n");
+}
+
+pub fn append_chunk_end(dst: &mut Vec<u8>) {
+    dst.extend_from_slice(b"0\r\n\r\n");
+}
+
+fn hex_usize(n: usize, dst: &mut [u8; 16]) -> usize {
+    if n == 0 {
+        dst[0] = b'0';
+        return 1;
+    }
+    let mut x = n;
+    let mut tmp = [0u8; 16];
+    let mut i = 0usize;
+    while x > 0 {
+        tmp[i] = b"0123456789abcdef"[x & 15];
+        x >>= 4;
+        i += 1;
+    }
+    for k in 0..i {
+        dst[k] = tmp[i - 1 - k];
+    }
+    i
 }
 
 #[cfg(test)]
@@ -61,5 +110,22 @@ mod tests {
         assert!(s.contains("Content-Length: 11\r\n"), "{s}");
         assert!(b.ends_with(br#"{"ok":true}"#), "{s}");
         assert_eq!(s.matches("\r\n\r\n").count(), 1);
+    }
+
+    #[test]
+    fn encode_head_omits_body_keeps_length() {
+        let out = Out {
+            status: Status::OK,
+            reason: None,
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: OutBody::Raw(Bytes::from_static(b"hello")),
+            cache: CacheDirective::No,
+            flags: FlagSet::empty(),
+        };
+        let mut b = Vec::new();
+        encode_head(&out, &mut b);
+        let s = std::str::from_utf8(&b).unwrap();
+        assert!(s.contains("Content-Length: 5\r\n"), "{s}");
+        assert!(!s.contains("hello"), "{s}");
     }
 }

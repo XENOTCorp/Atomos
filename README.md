@@ -32,4 +32,4 @@ Architecture (planes, pre/post, hot-swap): [Docs/Wiki/Architecture.md](Docs/Wiki
 
 Wiki: [Docs/Wiki/Home.md](Docs/Wiki/Home.md)
 
-License: MIT. Copyright (c) 2026 XENOT Corporation.
+License: Apache-2.0. Copyright 2026 XENOT Corporation.

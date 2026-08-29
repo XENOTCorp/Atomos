@@ -3,12 +3,14 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use crate::encode::encode_response;
+use crate::encode::{encode_head, encode_response};
 use crate::error::ServeError;
 use crate::error_page::ErrorPage;
 use crate::flags::FlagSet;
 use crate::io::{Body, HeaderView, In, Out};
-use crate::parse::{looks_like_json, parse_request, scan_json, ParseStatus};
+use crate::parse::{
+    decode_chunked_into, looks_like_json, parse_request, scan_json, ParseStatus,
+};
 use crate::route::Router;
 use crate::status::Status;
 
@@ -28,11 +30,11 @@ where
     let timeout = Duration::from_millis(router.cfg.request_timeout_ms.max(1_000));
     let mut tmp = [0u8; 4096];
     loop {
-        let (out, used, ka) = loop {
+        let (out, used, ka, head) = loop {
             match parse_request(&buf, router.cfg.max_header_bytes) {
                 Ok(ParseStatus::Partial) => {
                     if buf.len() > router.cfg.max_header_bytes {
-                        write_out(&mut stream, &quick_err(400, "headers")).await?;
+                        write_out(&mut stream, &quick_err(400, "headers"), false).await?;
                         return Ok(());
                     }
                     let n = read_more(&mut stream, &mut tmp, timeout, buf.is_empty()).await?;
@@ -43,18 +45,22 @@ where
                 }
                 Ok(ParseStatus::Complete(p)) => {
                     if p.content_length > router.cfg.max_body_bytes {
-                        write_out(&mut stream, &quick_err(413, "body")).await?;
+                        write_out(&mut stream, &quick_err(413, "body"), false).await?;
                         return Ok(());
                     }
-                    let need = p.header_end + p.content_length;
+                    let need = p.wire_end;
                     if buf.len() < need {
                         let n = read_more(&mut stream, &mut tmp, timeout, false).await?;
                         if n == 0 {
-                            write_out(&mut stream, &quick_err(400, "body")).await?;
+                            write_out(&mut stream, &quick_err(400, "body"), false).await?;
                             return Ok(());
                         }
                         buf.extend_from_slice(&tmp[..n]);
                         continue;
+                    }
+                    if p.upgrade {
+                        write_out(&mut stream, &quick_err(426, "upgrade"), false).await?;
+                        return Ok(());
                     }
                     if p.content_length == 0 {
                         if let Some(wire) = router.cache.get_wire(p.method, p.path, p.query) {
@@ -68,10 +74,16 @@ where
                             continue;
                         }
                     }
-                    let body_bytes = &buf[p.header_end..need];
+                    let mut decoded = Vec::new();
+                    let body_bytes: &[u8] = if p.chunked {
+                        decode_chunked_into(&buf[p.header_end..need], &mut decoded)?;
+                        &decoded
+                    } else {
+                        &buf[p.header_end..need]
+                    };
                     if looks_like_json(body_bytes) {
                         if let Err(e) = scan_json(body_bytes, router.cfg.max_json_depth) {
-                            write_out(&mut stream, &quick_err(e.status(), "json")).await?;
+                            write_out(&mut stream, &quick_err(e.status(), "json"), false).await?;
                             let ka = p.keepalive;
                             compact(&mut buf, need);
                             if !ka {
@@ -97,20 +109,21 @@ where
                         flags: FlagSet::empty(),
                     };
                     let ka = p.keepalive;
+                    let head = p.method == crate::io::Method::Head;
                     let out = if router.has_async() {
                         router.dispatch_async(req).await
                     } else {
                         router.dispatch(req)
                     };
-                    break (out, need, ka);
+                    break (out, need, ka, head);
                 }
                 Err(_) => {
-                    write_out(&mut stream, &quick_err(400, "parse")).await?;
+                    write_out(&mut stream, &quick_err(400, "parse"), false).await?;
                     return Ok(());
                 }
             }
         };
-        write_out(&mut stream, &out).await?;
+        write_out(&mut stream, &out, head).await?;
         compact(&mut buf, used);
         if !ka {
             return Ok(());
@@ -161,7 +174,7 @@ pub(crate) fn quick_err(code: u16, detail: &'static str) -> Out {
     }
 }
 
-pub(crate) async fn write_out<S>(stream: &mut S, out: &Out) -> Result<(), ServeError>
+pub(crate) async fn write_out<S>(stream: &mut S, out: &Out, head: bool) -> Result<(), ServeError>
 where
     S: AsyncWrite + Unpin,
 {
@@ -169,12 +182,14 @@ where
     if buf.capacity() < 512 {
         buf = Vec::with_capacity(2048);
     }
-    if matches!(out.body, crate::io::OutBody::File(_)) {
+    if matches!(out.body, crate::io::OutBody::File(_)) && !head {
         // Tokio H1 cannot sendfile (generic AsyncWrite, possibly TLS):
         // materialize the file on a blocking thread, then encode bytes.
         let mut o = out.clone();
         o.body = crate::io::OutBody::Raw(crate::proto::materialize_file_body(&o).await);
         encode_response(&o, &mut buf);
+    } else if head {
+        encode_head(out, &mut buf);
     } else {
         encode_response(out, &mut buf);
     }

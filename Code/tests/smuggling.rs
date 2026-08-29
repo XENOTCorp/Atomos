@@ -1,4 +1,4 @@
-//! Request smuggling: Content-Length + Transfer-Encoding is 400.
+//! HTTP/1.1 framing corpus. One named case per attack.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -9,8 +9,7 @@ use atomos::engine::{self, EngineKind};
 use atomos::rules::Ruleset;
 use atomos::static_router;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn content_length_and_transfer_encoding_rejected() {
+async fn spawn_static() -> (u16, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), b"ok").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -33,23 +32,133 @@ async fn content_length_and_transfer_encoding_rejected() {
         let _ = engine::run(EngineKind::Epoll, router, ctx).await;
     });
     let addr = format!("127.0.0.1:{port}");
-    let mut body = Vec::new();
     for _ in 0..50 {
-        if let Ok(mut s) = TcpStream::connect(&addr) {
-            s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            write!(
-                s,
-                "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nWAIT"
-            )
-            .unwrap();
-            s.read_to_end(&mut body).unwrap();
+        if TcpStream::connect(&addr).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let s = String::from_utf8_lossy(&body);
-    assert!(
-        s.starts_with("HTTP/1.1 400") || s.is_empty() || s.starts_with("HTTP/1.1 4"),
-        "{s}"
+    (port, dir)
+}
+
+fn exchange(port: u16, req: &[u8]) -> Vec<u8> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    s.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    s.write_all(req).unwrap();
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let mut body = Vec::new();
+    let _ = s.read_to_end(&mut body);
+    body
+}
+
+fn status_line(body: &[u8]) -> &str {
+    let s = std::str::from_utf8(body).unwrap_or("");
+    s.split("\r\n").next().unwrap_or(s)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cl_te_both() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nWAIT",
     );
+    assert!(
+        status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(),
+        "{}",
+        status_line(&b)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_cl() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nContent-Length: 5\r\nConnection: close\r\n\r\nWAIT!",
+    );
+    assert!(status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(), "{}", status_line(&b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn te_chunked_junk() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, identity\r\nConnection: close\r\n\r\n0\r\n\r\n",
+    );
+    assert!(status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(), "{}", status_line(&b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn obs_fold() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"GET / HTTP/1.1\r\nHost: x\r\nX-Foo:\r\n bar\r\nConnection: close\r\n\r\n",
+    );
+    assert!(status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(), "{}", status_line(&b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abs_uri() {
+    let (port, _dir) = spawn_static().await;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    s.write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut body = Vec::new();
+    let _ = s.read_to_end(&mut body);
+    let sl = status_line(&body);
+    assert!(
+        sl.starts_with("HTTP/1.1 200") || sl.starts_with("HTTP/1.1 400"),
+        "{sl:?} body={body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_mismatch() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"GET http://evil/admin HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert!(status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(), "{}", status_line(&b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tab_in_name() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"GET / HTTP/1.1\r\nHost: x\r\nX-Foo\tBar: 1\r\nConnection: close\r\n\r\n",
+    );
+    assert!(status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(), "{}", status_line(&b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_ext_smuggle() {
+    let (port, _dir) = spawn_static().await;
+    let b = exchange(
+        port,
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4;\nGET / HTTP/1.1\r\n\r\n0\r\n\r\n",
+    );
+    assert!(status_line(&b).starts_with("HTTP/1.1 400") || b.is_empty(), "{}", status_line(&b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_two() {
+    let (port, _dir) = spawn_static().await;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    s.write_all(
+        b"GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .unwrap();
+    let mut body = Vec::new();
+    let _ = s.read_to_end(&mut body);
+    let text = String::from_utf8_lossy(&body);
+    let n = text.matches("HTTP/1.1 200").count();
+    assert!(n >= 2, "expected two responses, got {n}: {text}");
 }

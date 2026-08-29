@@ -31,12 +31,17 @@ use fds::util::now_ticks;
 use crate::access_log;
 use crate::align::STATE_ON;
 use crate::atom::AtomCtx;
-use crate::encode::encode_response;
+use crate::encode::{append_chunk, append_chunk_end, encode_head, encode_response};
 use crate::error::ServeError;
 use crate::flags::FlagSet;
-use crate::io::{Body, HeaderView, In, OutBody};
-use crate::parse::{looks_like_json, parse_request, scan_json, ParseStatus};
+use crate::io::{Body, HeaderView, In, Out, OutBody};
+use crate::parse::{
+    decode_chunked_into, find_header_end, looks_like_json, parse_request, scan_json, ParseStatus,
+};
+use crate::status::Status;
+use std::time::Instant;
 use crate::pin_cpu;
+use crate::cache::ResponseCache;
 use crate::route::Router;
 use crate::static_mod::SF_MIN;
 
@@ -208,6 +213,7 @@ fn worker(listener: TcpListener, router: Arc<Router>, ctx: Arc<AtomCtx>) -> io::
             Err(e) => return Err(e),
         };
         if n == 0 {
+            reap_idle(&mut reactor, &mut streams, &router);
             continue;
         }
         let m = reactor.copy_events(n, &mut evbuf);
@@ -291,6 +297,7 @@ fn accept_loop<'a>(
                     out: Vec::with_capacity(OUT_CAP),
                     out_off: 0,
                     pending_sf: None,
+                    last_rw: Instant::now(),
                     slot,
                 });
             }
@@ -349,6 +356,7 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
         match c.stream.read(&mut tmp) {
             Ok(0) => return Ok(false),
             Ok(n) => {
+                c.last_rw = Instant::now();
                 let max = buf_capacity_for(
                     router.cfg.max_header_bytes,
                     router.cfg.max_body_bytes,
@@ -377,12 +385,16 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
         }
         match parse_request(&c.buf[c.pos..], router.cfg.max_header_bytes) {
             Ok(ParseStatus::Partial) => return Ok(true),
-            Err(_) => return Ok(false),
+            Err(_) => {
+                reply_status(c, enc, Status::BAD_REQUEST)?;
+                return Ok(false);
+            }
             Ok(ParseStatus::Complete(p)) => {
                 if p.content_length > router.cfg.max_body_bytes {
+                    reply_status(c, enc, Status::from_u16(413))?;
                     return Ok(false);
                 }
-                let need_rel = p.header_end + p.content_length;
+                let need_rel = p.wire_end;
                 if c.buf.len() - c.pos < need_rel {
                     return Ok(true);
                 }
@@ -390,35 +402,74 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                 if c.buf.get(c.pos) == Some(&b'P') && c.buf[c.pos..].starts_with(b"PRI ") {
                     return Ok(false);
                 }
+                if p.upgrade {
+                    reply_status(c, enc, Status::UPGRADE_REQUIRED)?;
+                    return Ok(false);
+                }
+                let head = p.method == crate::io::Method::Head;
                 if p.content_length == 0 {
-                    if let Some(wire) = router.cache.get_wire(p.method, p.path, p.query) {
-                        let ka = p.keepalive;
-                        if router.cfg.access_log {
-                            // Prefer Out body len when still cached; else skip bytes.
-                            let (status, blen) = match router.cache.get(p.method, p.path, p.query) {
-                                Some(o) => (o.status.as_u16(), o.body.len()),
-                                None => (200, 0),
-                            };
-                            access_log::emit(p.method, p.path, status, blen);
+                    if let Some(hit) = router.cache.get(p.method, p.path, p.query) {
+                        if ResponseCache::not_modified(&p.headers, &hit) {
+                            let o = Out::empty(Status::NOT_MODIFIED);
+                            enc.clear();
+                            encode_response(&o, enc);
+                            let ka = p.keepalive;
+                            c.pos = need;
+                            queue_bytes(c, enc)?;
+                            if !ka {
+                                let _ = flush_out(c);
+                                return Ok(false);
+                            }
+                            continue;
                         }
-                        c.pos = need;
-                        queue_bytes(c, wire.as_ref())?;
-                        if !ka {
-                            let _ = flush_out(c);
-                            return Ok(false);
+                        if head {
+                            enc.clear();
+                            encode_head(&hit, enc);
+                            let ka = p.keepalive;
+                            c.pos = need;
+                            queue_bytes(c, enc)?;
+                            if !ka {
+                                let _ = flush_out(c);
+                                return Ok(false);
+                            }
+                            continue;
                         }
-                        continue;
+                        if let Some(wire) = router.cache.get_wire(p.method, p.path, p.query) {
+                            let ka = p.keepalive;
+                            if router.cfg.access_log {
+                                access_log::emit(
+                                    p.method,
+                                    p.path,
+                                    hit.status.as_u16(),
+                                    hit.body.len(),
+                                );
+                            }
+                            c.pos = need;
+                            queue_bytes(c, wire.as_ref())?;
+                            if !ka {
+                                let _ = flush_out(c);
+                                return Ok(false);
+                            }
+                            continue;
+                        }
                     }
                 }
-                let body_bytes = &c.buf[c.pos + p.header_end..need];
+                let mut decoded = Vec::new();
+                let body_bytes: &[u8] = if p.chunked {
+                    let start = c.pos + p.header_end;
+                    decode_chunked_into(&c.buf[start..need], &mut decoded)
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunked"))?;
+                    &decoded
+                } else {
+                    &c.buf[c.pos + p.header_end..need]
+                };
                 if looks_like_json(body_bytes)
                     && scan_json(body_bytes, router.cfg.max_json_depth).is_err()
                 {
-                    let ka = p.keepalive;
-                    c.pos = need;
-                    return Ok(ka);
+                    reply_status(c, enc, Status::BAD_REQUEST)?;
+                    return Ok(false);
                 }
-                let body = if p.content_length == 0 {
+                let body = if body_bytes.is_empty() {
                     Body::Empty
                 } else if looks_like_json(body_bytes) {
                     Body::Json(body_bytes)
@@ -439,20 +490,44 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                     .cfg
                     .access_log
                     .then(|| (p.method, p.path.to_string()));
-                let out = router.dispatch(req);
-                // Encode into the reused per-worker scratch: no heap
-                // allocation per request after warm-up (ALLOC-01).
+                let t0 = Instant::now();
+                let mut out = router.dispatch(req);
+                if t0.elapsed().as_millis() as u64 > router.cfg.module_timeout_ms.max(1) {
+                    out = Out::empty(Status::GATEWAY_TIMEOUT);
+                }
                 enc.clear();
-                encode_response(&out, enc);
-                queue_bytes(c, enc)?;
-                if let OutBody::File(f) = &out.body {
-                    // Headers are in `out` (Content-Length = file size);
-                    // the body goes kernel-side via sendfile.
-                    c.pending_sf = Some(PendingSf {
-                        file: f.file.clone(),
-                        offset: f.offset as libc::off_t,
-                        len: f.len,
-                    });
+                if head {
+                    encode_head(&out, enc);
+                    queue_bytes(c, enc)?;
+                } else if matches!(out.body, OutBody::Stream(_)) {
+                    encode_response(&out, enc);
+                    queue_bytes(c, enc)?;
+                    if let OutBody::Stream(s) = &out.body {
+                        let mut rx = s.take();
+                        loop {
+                            match rx.try_recv() {
+                                Ok(chunk) => {
+                                    enc.clear();
+                                    append_chunk(enc, &chunk);
+                                    queue_bytes(c, enc)?;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    enc.clear();
+                    append_chunk_end(enc);
+                    queue_bytes(c, enc)?;
+                } else {
+                    encode_response(&out, enc);
+                    queue_bytes(c, enc)?;
+                    if let OutBody::File(f) = &out.body {
+                        c.pending_sf = Some(PendingSf {
+                            file: f.file.clone(),
+                            offset: f.offset as libc::off_t,
+                            len: f.len,
+                        });
+                    }
                 }
                 if let Some((method, path)) = log {
                     access_log::emit(method, &path, out.status.as_u16(), out.body.len());
@@ -463,6 +538,40 @@ fn read_and_serve(c: &mut Conn<'_>, router: &Router, enc: &mut Vec<u8>) -> io::R
                     return Ok(false);
                 }
             }
+        }
+    }
+}
+
+fn reply_status(c: &mut Conn<'_>, enc: &mut Vec<u8>, st: Status) -> io::Result<()> {
+    let out = Out::empty(st);
+    enc.clear();
+    encode_response(&out, enc);
+    queue_bytes(c, enc)?;
+    let _ = flush_out(c);
+    Ok(())
+}
+
+fn reap_idle(reactor: &mut Reactor, streams: &mut [Option<Conn<'_>>], router: &Router) {
+    let now = Instant::now();
+    for slot in streams.iter_mut() {
+        let Some(c) = slot.as_ref() else {
+            continue;
+        };
+        let idle_ms = now.saturating_duration_since(c.last_rw).as_millis() as u64;
+        let pending = c.buf.len() > c.pos;
+        let headers_done = pending && find_header_end(&c.buf[c.pos..]).is_some();
+        let limit = if !pending {
+            router.cfg.idle_timeout_ms
+        } else if headers_done {
+            router.cfg.body_timeout_ms
+        } else {
+            router.cfg.header_timeout_ms
+        };
+        if idle_ms <= limit.max(1) {
+            continue;
+        }
+        if let Some(c) = slot.take() {
+            let _ = reactor.unregister(c.stream.as_raw_fd());
         }
     }
 }

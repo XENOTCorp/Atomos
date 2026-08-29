@@ -1,6 +1,7 @@
 //! Per-connection HTTP/1.1 state on an FDS table slot.
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use fds::conn::{ConnectionSlot, CONN_CAP};
 use fds::tcp::TcpStream;
 
@@ -18,6 +19,8 @@ pub(crate) struct Conn<'a> {
     /// written: the worker keeps writable interest and skips reads
     /// until it completes (request/response order must be preserved).
     pub(crate) pending_sf: Option<PendingSf>,
+    /// Last successful read or write. Slowloris and idle use this.
+    pub(crate) last_rw: Instant,
     /// Held for the connection's lifetime: dropping it releases the
     /// table slot exactly once (never call `release_slot` while a guard
     /// is alive: that would double-release the free-list ring).

@@ -80,6 +80,7 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
     let errors = ErrorPage::load(&cfg.error_page);
     let st = StaticMod::new(cfg.static_root.clone(), errors.clone());
     let metrics = Arc::new(Metrics::new());
+    let cache = ResponseCache::new(cfg.cache_entries, cfg.cache_bytes);
     let mut modules: ModuleMap = hashbrown::HashMap::new();
     modules.insert("static".into(), Handler::Sync(st.clone()));
     modules.insert(
@@ -93,13 +94,14 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
         started: std::time::Instant::now(),
         allow_write: true,
         stop: Arc::new(LineAtomicU8::new(0)),
+        cache: Arc::new(cache.clone()),
     });
     let sched = {
         let (limits, custom) = cfg.scheduler.build();
         crate::sched::Sched::sharded(cfg.workers.max(1) as usize, cfg.scheduler.mode, custom, limits)
     };
     let router = Arc::new(Router {
-        cache: ResponseCache::new(cfg.cache_entries, cfg.cache_bytes),
+        cache,
         gov: Governor::from_config(&cfg),
         errors,
         rules: ctx.rules.clone(),

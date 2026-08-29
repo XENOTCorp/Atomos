@@ -9,6 +9,18 @@ use crate::align::{STATE_OFF, STATE_ON};
 use crate::error::AtomError;
 use crate::rules::Ruleset;
 
+pub(crate) fn cache_purge(ctx: &AtomCtx, input: Value) -> Result<Value, AtomError> {
+    if !ctx.allow_write {
+        return Err(AtomError::PureActuate);
+    }
+    if let Some(id) = input.get("id").and_then(|v| v.as_str()) {
+        ctx.cache.invalidate_named(id);
+    } else {
+        ctx.cache.invalidate();
+    }
+    Ok(json!({ "ok": true }))
+}
+
 pub(crate) fn rules_reload(ctx: &AtomCtx) -> Result<Value, AtomError> {
     if !ctx.allow_write {
         return Err(AtomError::PureActuate);

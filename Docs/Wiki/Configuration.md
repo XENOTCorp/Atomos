@@ -20,8 +20,12 @@ Important fields:
 | `max_header_bytes` | Header size bound. |
 | `max_body_bytes` | Body size bound. |
 | `max_json_depth` | JSON depth bound. |
+| `header_timeout_ms` | Incomplete headers. Default 10 s. |
+| `body_timeout_ms` | Incomplete body. Default 30 s. |
+| `idle_timeout_ms` | Keep-alive idle. Default 75 s. |
+| `module_timeout_ms` | 504 if `handle` runs longer. Default 5 s. |
 | `http2` / `http3` | Proto process only. |
-| `tls_cert` / `tls_key` | TLS files for proto. |
+| `tls_cert` / `tls_key` | TLS on proto. H1 epoll TLS is not in this tree yet. |
 | `plugin_dir` | Plugin manifests. |
 | `pre_module` / `post_module` | Optional hooks. |
 | `landlock` / `seccomp` | Post-bind jail. Linux. |

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 # fds (path dep) requires rustc 1.97.1. That crate is the transport this kernel uses.
 rust-version = "1.97.1"
-license = "MIT"
+license = "Apache-2.0"
 description = "HTTP kernel: disjoint JSON rules, modules, atoms, operator CLI."
 readme = "../README.md"
 keywords = ["http", "http2", "http3", "server"]

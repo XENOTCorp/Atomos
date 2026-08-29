@@ -12,7 +12,9 @@ Body types:
 - `Stream`
 - `File`
 
-The H1 epoll path sends `File` with `sendfile`. The tokio paths materialize the file in memory. HTTP/2, HTTP/3, and TLS need the bytes.
+The H1 epoll path sends `File` with `sendfile`. Range requests return 206. Invalid ranges return 416. HEAD keeps `Content-Length` and omits body bytes. The tokio paths materialize the file in memory. HTTP/2, HTTP/3, and TLS need the bytes.
+
+H1 `Stream` is chunked transfer of bytes already queued when `handle` returns.
 
 Cache directives:
 

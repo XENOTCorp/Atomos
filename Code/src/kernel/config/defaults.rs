@@ -44,6 +44,18 @@ pub(crate) fn default_json_depth() -> u32 {
 pub(crate) fn default_timeout() -> u64 {
     45_000
 }
+pub(crate) fn default_header_timeout() -> u64 {
+    10_000
+}
+pub(crate) fn default_body_timeout() -> u64 {
+    30_000
+}
+pub(crate) fn default_idle_timeout() -> u64 {
+    75_000
+}
+pub(crate) fn default_module_timeout() -> u64 {
+    5_000
+}
 pub(crate) fn default_mem() -> u64 {
     6_000_000_000
 }

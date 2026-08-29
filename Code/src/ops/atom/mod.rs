@@ -9,6 +9,7 @@ use arc_swap::ArcSwap;
 use serde_json::{json, Value};
 
 use crate::align::{LineAtomicU8, STATE_OFF, STATE_ON, STATE_RESTARTING};
+use crate::cache::ResponseCache;
 use crate::error::AtomError;
 use crate::rules::Ruleset;
 
@@ -36,6 +37,7 @@ pub struct AtomCtx {
     pub started: Instant,
     pub allow_write: bool,
     pub stop: Arc<LineAtomicU8>,
+    pub cache: Arc<ResponseCache>,
 }
 
 impl AtomCtx {
@@ -48,6 +50,7 @@ impl AtomCtx {
             started: Instant::now(),
             allow_write: true,
             stop: Arc::new(LineAtomicU8::new(0)),
+            cache: Arc::new(ResponseCache::new(8, 64 * 1024)),
         }
     }
 
@@ -72,6 +75,7 @@ pub fn dispatch(ctx: &AtomCtx, name: &str, input: Value) -> Result<Value, AtomEr
             server_set(ctx, STATE_ON)
         }
         "rules.reload" => rules_reload(ctx),
+        "cache.purge" => cache_purge(ctx, input),
         "tunnel.apply" => Ok(json!({"ok": false, "error": "unconfigured"})),
         _ => Err(AtomError::Unknown(name.into())),
     }

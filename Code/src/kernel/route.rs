@@ -91,6 +91,19 @@ impl Router {
         self.modules.load().get(name).cloned()
     }
 
+    fn maybe_304(&self, req: &In<'_>, hit: Out) -> Out {
+        if ResponseCache::not_modified(&req.headers.pairs, &hit) {
+            let mut o = Out::empty(Status::NOT_MODIFIED);
+            for (k, v) in &hit.headers {
+                if k.eq_ignore_ascii_case("etag") || k.eq_ignore_ascii_case("last-modified") {
+                    o.headers.push((k.clone(), v.clone()));
+                }
+            }
+            return o;
+        }
+        hit
+    }
+
     /// Hot-swap one named handler. Cache-hit path does not look this up.
     pub fn insert(&self, name: impl Into<String>, h: Handler) {
         let name = name.into();
@@ -133,7 +146,7 @@ impl Router {
         }
         if let Some(hit) = self.cache.get(req.method, req.path, req.query) {
             self.metrics.hits.v.fetch_add(1, Ordering::Relaxed);
-            return self.track_bytes(hit);
+            return self.track_bytes(self.maybe_304(&req, hit));
         }
         if let Some(pre) = &self.pre {
             match pre.handle(&req) {
@@ -211,7 +224,7 @@ impl Router {
         }
         if let Some(hit) = self.cache.get(req.method, req.path, req.query) {
             self.metrics.hits.v.fetch_add(1, Ordering::Relaxed);
-            return self.track_bytes(hit);
+            return self.track_bytes(self.maybe_304(&req, hit));
         }
         if let Some(pre) = &self.pre {
             match pre.handle(&req) {

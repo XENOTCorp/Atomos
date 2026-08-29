@@ -136,14 +136,6 @@ impl Module for StaticMod {
         } else {
             60_000
         };
-        let out = |body: OutBody| Out {
-            status: Status::OK,
-            reason: None,
-            headers: vec![("Content-Type".into(), ct.into())],
-            body,
-            cache: CacheDirective::Global { ttl_ms: ttl },
-            flags: crate::flags::FlagSet::empty(),
-        };
         // Large-file hit path: the fd LRU serves the body with no
         // stat/open syscalls at all (the byte path's response-cache
         // equivalent for the sendfile path).
@@ -152,16 +144,10 @@ impl Module for StaticMod {
         fd.seq = stamp;
         if let Some(e) = fd.map.get_mut(&dest) {
             e.last = stamp;
-            let body = if req.method == Method::Head {
-                OutBody::Empty
-            } else {
-                OutBody::File(FileBody {
-                    file: e.file.clone(),
-                    offset: 0,
-                    len: e.len,
-                })
-            };
-            return Ok(out(body));
+            let file = e.file.clone();
+            let len = e.len;
+            drop(fd);
+            return Ok(ranged_file(req, ct, ttl, file, len));
         }
         drop(fd);
         // Miss path: extension fallback + one metadata call, then either
@@ -177,22 +163,12 @@ impl Module for StaticMod {
         } else {
             60_000
         };
-        let out = |body: OutBody| Out {
-            status: Status::OK,
-            reason: None,
-            headers: vec![("Content-Type".into(), ct.into())],
-            body,
-            cache: CacheDirective::Global { ttl_ms: ttl },
-            flags: crate::flags::FlagSet::empty(),
-        };
         let meta = match std::fs::metadata(&dest) {
             Ok(m) if m.is_file() => m,
             _ => return Ok(self.not_found()),
         };
         let len = meta.len();
-        let body = if req.method == Method::Head {
-            OutBody::Empty
-        } else if len >= sf_min() {
+        if len >= sf_min() {
             let mut fd = self.fd.lock();
             let f = match std::fs::File::open(&dest) {
                 Ok(f) => f,
@@ -209,18 +185,142 @@ impl Module for StaticMod {
             );
             fd.evict_if_over();
             let e = fd.map.get(&dest).expect("just inserted");
+            let file = e.file.clone();
+            drop(fd);
+            return Ok(ranged_file(req, ct, ttl, file, len));
+        }
+        match std::fs::read(&dest) {
+            Ok(b) => Ok(ranged_bytes(req, ct, ttl, Bytes::from(b))),
+            Err(_) => Ok(self.not_found()),
+        }
+    }
+}
+
+/// `Ok(None)` = whole entity. `Ok(Some((off,n)))` = one range. `Err` = 416.
+fn parse_byte_range(h: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(h) = h else {
+        return Ok(None);
+    };
+    let rest = h.strip_prefix("bytes=").ok_or(())?;
+    if rest.contains(',') {
+        return Err(());
+    }
+    if let Some(suf) = rest.strip_prefix('-') {
+        let n: u64 = suf.parse().map_err(|_| ())?;
+        if n == 0 || len == 0 {
+            return Err(());
+        }
+        let n = n.min(len);
+        return Ok(Some((len - n, n)));
+    }
+    let (a, b) = rest.split_once('-').ok_or(())?;
+    let start: u64 = a.parse().map_err(|_| ())?;
+    if start >= len {
+        return Err(());
+    }
+    let end = if b.is_empty() {
+        len - 1
+    } else {
+        b.parse::<u64>().map_err(|_| ())?
+    };
+    if end < start {
+        return Err(());
+    }
+    let end = end.min(len - 1);
+    Ok(Some((start, end - start + 1)))
+}
+
+fn ranged_file(req: &In<'_>, ct: &str, ttl: u32, file: Arc<std::fs::File>, len: u64) -> Out {
+    match parse_byte_range(req.headers.get("range"), len) {
+        Ok(None) => static_out(
+            Status::OK,
+            ct,
+            ttl,
+            len,
+            vec![],
             OutBody::File(FileBody {
-                file: e.file.clone(),
+                file,
                 offset: 0,
-                len: e.len,
-            })
-        } else {
-            match std::fs::read(&dest) {
-                Ok(b) => OutBody::Raw(Bytes::from(b)),
-                Err(_) => return Ok(self.not_found()),
-            }
-        };
-        Ok(out(body))
+                len,
+            }),
+        ),
+        Ok(Some((off, n))) => static_out(
+            Status::PARTIAL_CONTENT,
+            ct,
+            ttl,
+            len,
+            vec![(
+                "Content-Range".into(),
+                format!("bytes {off}-{}/{len}", off + n - 1).into(),
+            )],
+            OutBody::File(FileBody {
+                file,
+                offset: off,
+                len: n,
+            }),
+        ),
+        Err(()) => range_not_satisfiable(ct, len),
+    }
+}
+
+fn ranged_bytes(req: &In<'_>, ct: &str, ttl: u32, b: Bytes) -> Out {
+    let len = b.len() as u64;
+    match parse_byte_range(req.headers.get("range"), len) {
+        Ok(None) => static_out(Status::OK, ct, ttl, len, vec![], OutBody::Raw(b)),
+        Ok(Some((off, n))) => {
+            let s = off as usize;
+            let e = s + n as usize;
+            static_out(
+                Status::PARTIAL_CONTENT,
+                ct,
+                ttl,
+                len,
+                vec![(
+                    "Content-Range".into(),
+                    format!("bytes {off}-{}/{len}", off + n - 1).into(),
+                )],
+                OutBody::Raw(b.slice(s..e)),
+            )
+        }
+        Err(()) => range_not_satisfiable(ct, len),
+    }
+}
+
+fn static_out(
+    status: Status,
+    ct: &str,
+    ttl: u32,
+    entity_len: u64,
+    extra: Vec<(Box<str>, Box<str>)>,
+    body: OutBody,
+) -> Out {
+    let mut headers = vec![
+        ("Content-Type".into(), ct.into()),
+        ("Accept-Ranges".into(), "bytes".into()),
+        ("ETag".into(), format!("\"{entity_len}\"").into()),
+    ];
+    headers.extend(extra);
+    Out {
+        status,
+        reason: None,
+        headers,
+        body,
+        cache: CacheDirective::Global { ttl_ms: ttl },
+        flags: crate::flags::FlagSet::empty(),
+    }
+}
+
+fn range_not_satisfiable(ct: &str, len: u64) -> Out {
+    Out {
+        status: Status::RANGE_NOT_SATISFIABLE,
+        reason: None,
+        headers: vec![
+            ("Content-Type".into(), ct.into()),
+            ("Content-Range".into(), format!("bytes */{len}").into()),
+        ],
+        body: OutBody::Empty,
+        cache: CacheDirective::No,
+        flags: crate::flags::FlagSet::empty(),
     }
 }
 

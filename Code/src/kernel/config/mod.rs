@@ -38,6 +38,16 @@ pub struct Config {
     pub max_json_depth: u32,
     #[serde(default = "defaults::default_timeout")]
     pub request_timeout_ms: u64,
+    /// Slowloris: close if headers are still incomplete after this.
+    #[serde(default = "defaults::default_header_timeout")]
+    pub header_timeout_ms: u64,
+    #[serde(default = "defaults::default_body_timeout")]
+    pub body_timeout_ms: u64,
+    #[serde(default = "defaults::default_idle_timeout")]
+    pub idle_timeout_ms: u64,
+    /// After `handle` returns, 504 if the call ran longer than this.
+    #[serde(default = "defaults::default_module_timeout")]
+    pub module_timeout_ms: u64,
     #[serde(default = "defaults::default_mem")]
     pub memory_cap_bytes: u64,
     #[serde(default = "defaults::default_mem_mode")]

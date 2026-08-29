@@ -17,6 +17,7 @@ Effectful atoms:
 - `server.stop`
 - `server.restart`
 - `rules.reload`
+- `cache.purge`
 - `tunnel.apply`
 
 A molecule is a named list of atoms:

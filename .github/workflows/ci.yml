@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - name: cargo test
+        working-directory: Code
+        run: cargo test
+      - name: cargo test --release
+        working-directory: Code
+        run: cargo test --release
+      - name: cargo test --features proto
+        working-directory: Code
+        run: cargo test --features proto
+      - name: cargo test --features wasm
+        working-directory: Code
+        run: cargo test --features wasm
+      - name: clippy
+        working-directory: Code
+        run: cargo clippy --all-targets -- -D warnings
+      - name: compile.sh test
+        run: ./compile.sh test

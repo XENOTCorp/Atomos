@@ -113,9 +113,8 @@ pub enum OutBody {
     Empty,
     Raw(Bytes),
     Json(Bytes),
-    /// Response body streamed as chunks arrive (tokio path; the H1
-    /// epoll path encodes it as empty: streaming modules are async and
-    /// never dispatch on the sync H1 loop).
+    /// Response body streamed as chunks. H1 drains queued chunks as
+    /// `Transfer-Encoding: chunked`. Tokio paths may await further chunks.
     Stream(StreamBody),
     /// Open file range. The H1 epoll path sends it with `sendfile`
     /// (zero-copy in kernel); the tokio paths materialize it via

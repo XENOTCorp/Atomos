@@ -58,6 +58,7 @@ fn handle_cmd(ctx: &AtomCtx, cmd: &str) -> serde_json::Value {
     let name = match cmd {
         "status" => "signal.get",
         "refresh-endpoints" | "rules.reload" => "rules.reload",
+        "cache.purge" | "purge" => "cache.purge",
         "stop" => "server.stop",
         "start" => "server.start",
         "restart" => "server.restart",
