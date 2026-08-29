@@ -94,10 +94,10 @@ fn split_path_query(target: &str) -> (&str, &str) {
 
 /// Origin-form, asterisk-form, absolute-form. Authority-form only for CONNECT.
 /// Returns (path, query, uri-host).
-pub fn normalize_target<'a>(
+pub fn normalize_target(
     method: Method,
-    target: &'a str,
-) -> Result<(&'a str, &'a str, Option<&'a str>), ServeError> {
+    target: &str,
+) -> Result<(&str, &str, Option<&str>), ServeError> {
     if target.is_empty() {
         return Err(ServeError::Parse);
     }
@@ -227,9 +227,8 @@ pub fn decode_chunked_into(src: &[u8], dst: &mut Vec<u8>) -> Result<usize, Serve
 }
 
 pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, ServeError> {
-    match scan_header_block(buf, max_header)? {
-        None => return Ok(ParseStatus::Partial),
-        Some(_) => {}
+    if scan_header_block(buf, max_header)?.is_none() {
+        return Ok(ParseStatus::Partial);
     }
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
@@ -245,7 +244,8 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
     let mut saw_cl = false;
     let mut saw_te = false;
     let mut chunked = false;
-    let mut keepalive = req.version.unwrap_or(1) >= 1;
+    let version = req.version.unwrap_or(0);
+    let mut keepalive = version >= 1;
     let mut upgrade = false;
     let mut host_hdr: Option<&str> = None;
     let mut pairs = Vec::with_capacity(req.headers.len());
@@ -288,6 +288,11 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
         pairs.push((h.name, val));
     }
     if saw_cl && saw_te {
+        return Err(ServeError::Parse);
+    }
+    // HTTP/1.1 requires Host (RFC 9112). HTTP/1.0 does not; a request
+    // with no Host is served (200 on a matching rule).
+    if version >= 1 && host_hdr.is_none() {
         return Err(ServeError::Parse);
     }
     if let Some(uh) = uri_host {
@@ -503,7 +508,7 @@ mod tests {
         assert!(p.chunked);
         assert_eq!(p.content_length, 4);
         let mut body = Vec::new();
-        decode_chunked_into(&p_header_body(), &mut body).ok();
+        decode_chunked_into(p_header_body(), &mut body).ok();
         fn p_header_body() -> &'static [u8] {
             b"4\r\nWAIT\r\n0\r\n\r\n"
         }
@@ -530,5 +535,40 @@ mod tests {
         let raw =
             b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\nWAIT";
         assert!(matches!(parse_request(raw, 16384), Err(ServeError::Parse)));
+    }
+
+    #[test]
+    fn http11_missing_host_is_error() {
+        err(b"GET / HTTP/1.1\r\n\r\n");
+    }
+
+    #[test]
+    fn http10_no_host_is_ok() {
+        let p = complete(b"GET / HTTP/1.0\r\n\r\n");
+        assert_eq!(p.path, "/");
+        assert!(!p.keepalive);
+    }
+
+    #[test]
+    fn cl_non_numeric_is_error() {
+        err(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n");
+    }
+
+    #[test]
+    fn cl_negative_is_error() {
+        err(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n");
+    }
+
+    #[test]
+    fn te_gzip_chunked_is_error() {
+        err(b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n");
+    }
+
+    #[test]
+    fn header_line_over_max_is_error() {
+        let mut raw = b"GET / HTTP/1.1\r\nHost: x\r\nX: ".to_vec();
+        raw.extend(std::iter::repeat_n(b'a', 100));
+        raw.extend_from_slice(b"\r\n\r\n");
+        assert!(matches!(parse_request(&raw, 64), Err(ServeError::Parse)));
     }
 }
