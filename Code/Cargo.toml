@@ -61,8 +61,8 @@ path = "examples/bench_h23.rs"
 arc-swap = "1"
 bytes = "1"
 dtoa = "1"
-# Vendored FDS transport library. Features off: the H1 engine uses the
-# epoll reactor only (io_uring, AF_XDP, and SCTP are unused by Atomos).
+# Vendored FDS transport library. Features off: H1 uses the FDS epoll
+# reactor. io_uring, AF_XDP, and SCTP stay in the crate, unused here.
 fds = { path = "FDS/crates/fds", default-features = false }
 h2 = "0.4"
 h3 = "0.0.8"

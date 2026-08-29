@@ -10,7 +10,9 @@ Shared hot atomics are line-padded (`#[repr(C, align(64))]`, 64-byte line). Work
 
 `Sched::ip_key` hashes peer octets on the stack. It does not allocate.
 
-Default response cache without a host file is 16 MiB. `compile.sh` writes a host overlay that sets `cache_bytes` to L3 size and `workers` to `nproc`.
+Default response cache without a host file is 16 MiB. `compile.sh` writes a host overlay that sets `cache_bytes` to L3 size and `workers` to the physical core count.
+
+Worker threads pin through FDS topology: worker `i` uses the first SMT sibling of physical core `i`. Two workers on a sibling pair share L1/L2.
 
 Hot-path allocation is zero in the H1 engine after warm-up. Receive buffers, the connection table, and the encoder scratch are preallocated.
 

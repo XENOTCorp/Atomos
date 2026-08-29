@@ -23,6 +23,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
 license = "Apache-2.0"
+authors = ["XENOT Corporation"]
 ```
 
 4. Keep `mol = { path = "../mol" }` in `Code/FDS/crates/fds/Cargo.toml`.

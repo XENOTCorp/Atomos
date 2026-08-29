@@ -2,7 +2,7 @@
 
 `atomos-proto` runs the shared kernel on tokio. It peeks the TCP stream and dispatches to TLS, HTTP/2 prior knowledge, or HTTP/1.1. UDP traffic with a QUIC initial goes to HTTP/3.
 
-TLS is on the proto path. The H1 epoll engine does not terminate TLS.
+TLS on `atomos-proto` covers HTTP/1.1, HTTP/2, and HTTP/3. The H1 epoll engine terminates TLS 1.3 with ALPN `http/1.1` when `h1_tls` is set.
 
 Measured tables: [../Benchmarks.md](../Benchmarks.md).
 

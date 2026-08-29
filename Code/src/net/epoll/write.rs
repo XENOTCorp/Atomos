@@ -10,30 +10,20 @@ pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
     }
     while c.out_off < c.out.len() {
         let rest = &c.out[c.out_off..];
-        // Same syscall as FDS `write_all` (`send` + MSG_NOSIGNAL), but
-        // the offset is kept so a partial write does not drop the tail.
-        let n = unsafe {
-            libc::send(
-                c.stream.as_raw_fd(),
-                rest.as_ptr() as *const libc::c_void,
-                rest.len(),
-                libc::MSG_NOSIGNAL,
-            )
-        };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::WouldBlock {
-                return Ok(());
+        // FDS `TcpStream::write` (`send` + MSG_NOSIGNAL). Offset is kept
+        // so a partial write does not drop the tail.
+        let n = match c.stream.write(rest) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "epoll: send zero",
+                ));
             }
-            return Err(e);
-        }
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "epoll: send zero",
-            ));
-        }
-        c.out_off += n as usize;
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        c.out_off += n;
         c.last_rw = std::time::Instant::now();
     }
     c.out.clear();

@@ -46,10 +46,10 @@ From `Code/`:
 | Rust target | `rustc -vV` host triple |
 | C compiler | `ATOMOS_CC`, else `cc`, `gcc`, `clang` |
 | Linker | `ATOMOS_LD`, else `lld`, `mold`, compiler default |
-| Workers | `nproc` |
+| Workers | physical cores (sysfs sibling groups) |
 | Cache bytes | L3 size in sysfs, else 16 MiB |
 
-The kernel default for workers is `available_parallelism`. The host overlay overwrites that value after `compile.sh write`.
+The kernel default for workers is the physical core count. The host overlay overwrites that value after `compile.sh write`. Extra workers wrap onto logical CPUs; the first N workers pin to distinct cores.
 
 ## Environment
 

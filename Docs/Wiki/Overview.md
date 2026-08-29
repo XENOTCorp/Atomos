@@ -7,7 +7,7 @@ Two engines share one kernel:
 - `atomos` serves HTTP/1.1 on the FDS epoll transport.
 - `atomos-proto` serves HTTP/1.1, HTTP/2, HTTP/3, and TLS on tokio.
 
-FDS crates live in `Code/FDS`.
+FDS crates live in `Code/FDS`. The vendored library includes epoll, io_uring, and AF_XDP datapaths. Atomos H1 uses the epoll reactor.
 
 Build on the target host with `./compile.sh`. See [Compile.md](Compile.md).
 

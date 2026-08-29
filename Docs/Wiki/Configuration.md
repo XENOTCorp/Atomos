@@ -7,7 +7,7 @@ Important fields:
 | Field | Role |
 |---|---|
 | `bind` | Listen address. Default `127.0.0.1:8090`. |
-| `engine` | `epoll` or `tokio`. |
+| `engine` | `epoll` (H1) or `tokio` (proto). |
 | `workers` | Pinned worker count. Host overlay may set this. |
 | `static_root` | Static files. |
 | `rules_path` | Rules JSON. |
@@ -25,12 +25,13 @@ Important fields:
 | `idle_timeout_ms` | Keep-alive idle. Default 75 s. |
 | `module_timeout_ms` | 504 if `handle` runs longer. Default 5 s. |
 | `http2` / `http3` | Proto process only. |
-| `tls_cert` / `tls_key` | TLS on proto. H1 epoll TLS is not in this tree yet. |
+| `tls_cert` / `tls_key` | TLS material. Proto uses it for H1/H2/H3. H1 epoll uses it when `h1_tls` is true. |
+| `h1_tls` | Terminate TLS 1.3 on the epoll H1 engine (ALPN `http/1.1`). |
 | `plugin_dir` | Plugin manifests. |
 | `pre_module` / `post_module` | Optional hooks. |
 | `landlock` / `seccomp` | Post-bind jail. Linux. |
 
-Host facts come from `.atomos/host.json`. `./compile.sh` writes that file. Workers follow `nproc`. `cache_bytes` follows L3 size. `refuse_ports` follows `ATOMOS_REFUSE_PORTS`.
+Host facts come from `.atomos/host.json`. `./compile.sh` writes that file. Workers follow physical cores (not SMT siblings). `cache_bytes` follows L3 size. `refuse_ports` follows `ATOMOS_REFUSE_PORTS`.
 
 Do not copy `.atomos/host.json` to another machine. See [Compile.md](Compile.md).
 

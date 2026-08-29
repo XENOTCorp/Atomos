@@ -1,5 +1,5 @@
 {
-  "note": "Checked-in median for CI regression. H1 plaintext 11 B from the in-tree harness (wrk -t4 -c256 -d15s, one worker per physical core).",
-  "atomos_h1_plaintext_11b_rps": 53477,
+  "note": "Checked-in median for CI regression. H1 plaintext 11 B from the in-tree harness (wrk -t4 -c256 -d15s, one worker per physical core, FDS topology pin).",
+  "atomos_h1_plaintext_11b_rps": 55000,
   "max_drop_ratio": 0.15
 }

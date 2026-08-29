@@ -70,10 +70,13 @@ fn sockaddr_to_socket_addr(ss: &libc::sockaddr_storage) -> SocketAddr {
         libc::AF_INET6 => {
             // SAFETY: as above, with `sockaddr_in6`.
             let sin6 = unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
-            SocketAddr::new(
-                std::net::IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr)),
-                u16::from_be(sin6.sin6_port),
-            )
+            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            let port = u16::from_be(sin6.sin6_port);
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                SocketAddr::new(std::net::IpAddr::V4(v4), port)
+            } else {
+                SocketAddr::new(std::net::IpAddr::V6(ip), port)
+            }
         }
         _ => panic!("socket reported a non-IP address family"),
     }
@@ -133,6 +136,14 @@ impl TcpListener {
         // takes ownership so it is closed exactly once, on drop.
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
         Self::apply_listen_options(&fd, cfg)?;
+        if family == libc::AF_INET6 {
+            set_int_sockopt(
+                &fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_V6ONLY,
+                i32::from(cfg.ipv6_only),
+            )?;
+        }
 
         let r = match addr {
             SocketAddr::V4(v4) => {
@@ -311,6 +322,37 @@ impl TcpStream {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "tcp: read EAGAIN",
+                ));
+            }
+            return Err(err);
+        }
+        Ok(n as usize)
+    }
+
+    /// Write `buf`, returning the number of bytes accepted. The write
+    /// may be partial. `WouldBlock` means the kernel send buffer is
+    /// full; callers treat it as drain-to-EAGAIN (write readiness is
+    /// the mirror image of read readiness).
+    pub fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // MSG_NOSIGNAL: the process does not ignore SIGPIPE, so writes
+        // to a reset connection must not raise it (same rule as
+        // `write_all`).
+        // SAFETY: send reads at most buf.len() bytes from `buf`, which
+        // is a valid slice for the duration of the call.
+        let n = unsafe {
+            libc::send(
+                self.fd.as_raw_fd(),
+                buf.as_ptr().cast::<libc::c_void>(),
+                buf.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if would_block(&err) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tcp: write EAGAIN",
                 ));
             }
             return Err(err);
@@ -582,6 +624,35 @@ mod tests {
         let mut back = [0u8; 2];
         client.read_exact(&mut back).unwrap();
         assert_eq!(&back, b"v6");
+    }
+
+    #[test]
+    fn tcp_dualstack_v4_client_on_v6_bind() {
+        let cfg = TcpConfig {
+            ipv6_only: false,
+            ..TcpConfig::default()
+        };
+        let listener = match TcpListener::bind("[::]:0".parse().unwrap(), &cfg, 128) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("skipping: IPv6 bind unavailable ({e})");
+                return;
+            }
+        };
+        let port = listener.local_addr().unwrap().port();
+        let mut client = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: dual-stack IPv4 connect failed ({e})");
+                return;
+            }
+        };
+        let (mut stream, peer) = accept_ready(&listener);
+        assert!(peer.is_ipv4(), "IPv4-mapped peer must present as IPv4: {peer}");
+        stream.write_all(b"ds").unwrap();
+        let mut back = [0u8; 2];
+        client.read_exact(&mut back).unwrap();
+        assert_eq!(&back, b"ds");
     }
 
     #[test]
