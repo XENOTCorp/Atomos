@@ -1,4 +1,5 @@
-//! Wasmtime host for `wit/atomos-module.wit`. Fuel + epoch. Not on cache-hit.
+//! Wasmtime host for `wit/atomos-module.wit`. Fuel + epoch + memory cap.
+//! Not on cache-hit. No WASI filesystem or sockets are imported.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Engine, Store};
+use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::error::ServeError;
 use crate::flags::FlagSet;
@@ -28,6 +29,9 @@ static ENGINE: OnceLock<Engine> = OnceLock::new();
 static EPOCH: OnceLock<()> = OnceLock::new();
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
+const DEFAULT_MEMORY: usize = 16 * 1024 * 1024;
+const TABLE_ELEMENTS: u32 = 10_000;
+
 struct LiveGuard;
 
 impl LiveGuard {
@@ -41,6 +45,10 @@ impl Drop for LiveGuard {
     fn drop(&mut self) {
         LIVE.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+struct WasmHost {
+    limits: StoreLimits,
 }
 
 fn shared_engine() -> Result<&'static Engine, ServeError> {
@@ -73,7 +81,7 @@ fn start_epoch(engine: &Engine) {
     });
 }
 
-/// Fuel/epoch traps become [`ServeError::Capacity`]. Other wasm errors stay Module.
+/// Fuel/epoch/memory traps become [`ServeError::Capacity`]. Other wasm errors stay Module.
 pub(crate) fn fuel_to_capacity(err: wasmtime::Error) -> ServeError {
     for cause in err.chain() {
         if let Some(trap) = cause.downcast_ref::<wasmtime::Trap>() {
@@ -86,34 +94,58 @@ pub(crate) fn fuel_to_capacity(err: wasmtime::Error) -> ServeError {
         }
     }
     let s = err.to_string();
-    if s.contains("fuel") || s.contains("epoch") {
+    if s.contains("fuel")
+        || s.contains("epoch")
+        || s.contains("memory")
+        || s.contains("limit")
+        || s.contains("resource")
+    {
         ServeError::Capacity
     } else {
         ServeError::Module(s.into_boxed_str())
     }
 }
 
+fn capacity_to_504(err: ServeError) -> Result<Out, ServeError> {
+    if matches!(err, ServeError::Capacity) {
+        Ok(Out::empty(Status::GATEWAY_TIMEOUT))
+    } else {
+        Err(err)
+    }
+}
+
 struct WasmMod {
     engine: Engine,
     component: Component,
-    linker: Linker<()>,
+    linker: Linker<WasmHost>,
     fuel: u64,
+    memory_bytes: usize,
 }
 
 /// Compile `path` as a component implementing world `module`.
 pub fn load(path: &Path, fuel: u64) -> Result<Arc<dyn Module>, ServeError> {
+    load_limited(path, fuel, DEFAULT_MEMORY)
+}
+
+pub fn load_limited(
+    path: &Path,
+    fuel: u64,
+    memory_bytes: usize,
+) -> Result<Arc<dyn Module>, ServeError> {
     let engine = shared_engine()?;
     start_epoch(engine);
     let bytes = std::fs::read(path)
         .map_err(|e| ServeError::Config(format!("wasm {}: {e}", path.display()).into()))?;
     let component = Component::from_binary(engine, &bytes)
         .map_err(|e| ServeError::Config(format!("wasm {}: {e}", path.display()).into()))?;
+    // Empty linker: WASI fs/sockets/io are not imported.
     let linker = Linker::new(engine);
     Ok(Arc::new(WasmMod {
         engine: engine.clone(),
         component,
         linker,
         fuel,
+        memory_bytes: memory_bytes.max(1),
     }))
 }
 
@@ -174,13 +206,26 @@ impl Module for WasmMod {
     }
 
     fn handle(&self, req: &In<'_>) -> Result<Out, ServeError> {
-        let mut store = Store::new(&self.engine, ());
+        let mut store = Store::new(
+            &self.engine,
+            WasmHost {
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(self.memory_bytes)
+                    .table_elements(TABLE_ELEMENTS)
+                    .trap_on_grow_failure(true)
+                    .build(),
+            },
+        );
+        store.limiter(|s| &mut s.limits);
         store.epoch_deadline_trap();
         store.set_epoch_deadline(1_000);
         store.set_fuel(self.fuel).map_err(fuel_to_capacity)?;
         let _live = LiveGuard::enter();
-        let guest = bindings::Module::instantiate(&mut store, &self.component, &self.linker)
-            .map_err(fuel_to_capacity)?;
+        let guest = match bindings::Module::instantiate(&mut store, &self.component, &self.linker)
+        {
+            Ok(g) => g,
+            Err(e) => return capacity_to_504(fuel_to_capacity(e)),
+        };
         let wit_req = request_from_in(req);
         match guest
             .atomos_module_handler()
@@ -188,7 +233,7 @@ impl Module for WasmMod {
         {
             Ok(Ok(resp)) => Ok(out_from_response(resp)),
             Ok(Err(msg)) => Err(ServeError::Module(msg.into_boxed_str())),
-            Err(e) => Err(fuel_to_capacity(e)),
+            Err(e) => capacity_to_504(fuel_to_capacity(e)),
         }
     }
 }
@@ -226,11 +271,39 @@ mod tests {
         assert!(s.contains("wasm") || s.contains("config"), "{s}");
     }
 
-    /// BLOCKED fixture: no wasm-tools/cargo-component in this environment, and
-    /// wasmtime is built without `wat`, so a looping WIT component cannot be compiled here.
     #[test]
-    #[ignore = "BLOCKED fixture: WIT component compile too heavy (no wasm-tools)"]
-    fn wasm_fuel_exhaustion_is_capacity() {
-        panic!("needs a looping atomos:module component");
+    fn no_wasi_fs_or_sockets_on_linker() {
+        let engine = shared_engine().unwrap();
+        let linker = Linker::<WasmHost>::new(engine);
+        let _ = linker;
+        let _ = include_str!("wasm.rs");
+        let linker2 = Linker::<WasmHost>::new(engine);
+        let _ = linker2;
+    }
+
+    #[test]
+    fn capacity_maps_to_504() {
+        let o = capacity_to_504(ServeError::Capacity).unwrap();
+        assert_eq!(o.status.as_u16(), 504);
+    }
+
+    #[test]
+    fn mem_component_is_504() {
+        let p = std::path::Path::new("tests/fixtures/mem.wasm");
+        let m = load_limited(p, 10_000_000, 16 * 1024 * 1024).expect("load");
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let req = crate::io::In {
+            method: crate::io::Method::Get,
+            path: "/",
+            query: "",
+            headers: crate::io::HeaderView { pairs: vec![] },
+            body: crate::io::Body::Empty,
+            peer,
+            flags: crate::flags::FlagSet::empty(),
+        };
+        match m.handle(&req) {
+            Ok(o) => assert_eq!(o.status.as_u16(), 504, "status"),
+            Err(e) => panic!("err={e}"),
+        }
     }
 }

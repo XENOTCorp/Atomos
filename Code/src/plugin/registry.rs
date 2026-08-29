@@ -53,7 +53,11 @@ pub fn load_dir(router: &Router, dir: &Path) -> Result<Vec<String>, ServeError> 
                     })?;
                     let base = p.parent().unwrap_or(dir);
                     let wasm_path = base.join(rel);
-                    let m = crate::plugin::wasm::load(&wasm_path, router.cfg.wasm_fuel)?;
+                    let m = crate::plugin::wasm::load_limited(
+                        &wasm_path,
+                        router.cfg.wasm_fuel,
+                        router.cfg.wasm_memory_bytes,
+                    )?;
                     router.insert(man.name.clone(), Handler::Sync(m));
                     loaded.push(man.name);
                 }
