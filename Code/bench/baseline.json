@@ -1,0 +1,5 @@
+{
+  "note": "Checked-in median for CI regression. H1 plaintext 11 B from the last isolated laptop run.",
+  "atomos_h1_plaintext_11b_rps": 86032,
+  "max_drop_ratio": 0.15
+}

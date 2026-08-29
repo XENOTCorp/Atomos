@@ -1,5 +1,11 @@
 # Benchmarks
 
+Reproducible numbers live in `Code/bench/`. `Code/bench/run.sh` builds the tree, runs Atomos H1 plaintext, Atomos proto TLS, nginx, and h2o one at a time, writes `Code/bench/out/$DATE.json`, and fails if Atomos H1 plaintext 11 B drops more than 15% versus `Code/bench/baseline.json`. GitHub-hosted Ubuntu is not the source of truth. Nightly is a self-hosted Linux box.
+
+The isolated SOTA benches from the H1 4 KiB accept-path work are produced by that harness (or they are out of the story). This file is the last laptop run.
+
+## Last laptop run
+
 Measured on one machine, one load generator, one payload set. Each server is the only listener on the box for its rows. Seastar `--smp 4` busy-polls idle cores; it is killed before the next server starts.
 
 ## Method
