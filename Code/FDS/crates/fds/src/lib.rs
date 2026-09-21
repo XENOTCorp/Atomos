@@ -45,6 +45,7 @@ pub mod util;
 
 mod checksum;
 
+#[cfg(feature = "sctp")]
 pub mod sctp;
 
 #[cfg(feature = "io-uring")]

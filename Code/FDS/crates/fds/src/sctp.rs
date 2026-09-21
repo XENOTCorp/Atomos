@@ -17,6 +17,7 @@
 //! (skipped gracefully with an eprintln when `socket(AF_SCTP, ...)` fails
 //! because the kernel SCTP module is absent), send/recv roundtrip with stream ids,
 //! SCTP_NODELAY option set, peeloff exercised if the kernel supports it.
+#![cfg(feature = "sctp")]
 
 use crate::config::SctpConfig;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -352,12 +353,7 @@ impl SctpSocket {
     }
 
     /// Send `data` on stream `stream_id` to `dst`.
-    pub fn send_msg(
-        &self,
-        data: &[u8],
-        stream_id: u16,
-        dst: SocketAddr,
-    ) -> std::io::Result<usize> {
+    pub fn send_msg(&self, data: &[u8], stream_id: u16, dst: SocketAddr) -> std::io::Result<usize> {
         let (ss, len) = sockaddr_of(&dst);
         // SAFETY: sctp_sendmsg wraps sendmsg(2), reads `msg`/`to`
         // synchronously, and does not retain pointers. The header declares

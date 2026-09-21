@@ -4,38 +4,135 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   test:
+    name: test (${{ matrix.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            args: ""
+          - name: release
+            args: --release
+          - name: proto
+            args: --features proto
+          - name: wasm
+            args: --features wasm
+          - name: all-features
+            args: --all-features
+    defaults:
+      run:
+        working-directory: Code
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Code
+          key: test-${{ matrix.name }}
+      - run: cargo test --locked ${{ matrix.args }}
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Code
+    steps:
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
           components: clippy
-      - name: cargo test
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Code
+          key: lint
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  vendored:
+    name: vendored (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mol
+            manifest: FDS/crates/mol/Cargo.toml
+            args: ""
+          - name: fds-epoll
+            manifest: FDS/crates/fds/Cargo.toml
+            args: --no-default-features
+          - name: fds-all
+            manifest: FDS/crates/fds/Cargo.toml
+            args: --all-features
+    defaults:
+      run:
         working-directory: Code
-        run: cargo test
-      - name: cargo test --release
-        working-directory: Code
-        run: cargo test --release
-      - name: cargo test --features proto
-        working-directory: Code
-        run: cargo test --features proto
-      - name: cargo test --features wasm
-        working-directory: Code
-        run: cargo test --features wasm
-      - name: clippy
-        working-directory: Code
-        run: cargo clippy --all-targets -- -D warnings
-      - name: compile.sh test
-        run: ./compile.sh test
-      - name: semantics
-        working-directory: Code
-        run: cargo test --features wasm --test smuggling --test http_semantics --test timeouts --test ws_policy --test h1_tls --test wasm_caps --test ctl_atoms
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Install SCTP link library
+        if: matrix.name == 'fds-all'
+        run: sudo apt-get update && sudo apt-get install -y libsctp-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Code/FDS/crates/${{ matrix.name == 'mol' && 'mol' || 'fds' }}
+          key: vendored-${{ matrix.name }}
+      - run: cargo test --manifest-path ${{ matrix.manifest }} ${{ matrix.args }}
+
+  host-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Generate host configuration
+        run: ./compile.sh write
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Code
+          key: host-build
+      - run: ./compile.sh test
+      - run: ./compile.sh
+
+  h2spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Code
+          key: h2spec
       - name: h2spec
         run: |
           set -euo pipefail
@@ -43,7 +140,7 @@ jobs:
           curl -fsSL -o h2spec.tgz "https://github.com/summerwind/h2spec/releases/download/v${H2SPEC_VER}/h2spec_linux_amd64.tar.gz"
           tar -xzf h2spec.tgz
           chmod +x ./h2spec
-          (cd Code && cargo build --features proto --bin atomos-proto)
+          (cd Code && cargo build --locked --features proto --bin atomos-proto)
           TMP=$(mktemp -d)
           printf 'ok' > "$TMP/index.html"
           cat >"$TMP/config.json" <<EOF
@@ -54,17 +151,10 @@ jobs:
           EOF
           Code/target/debug/atomos-proto --config "$TMP/config.json" --rules "$TMP/rules.json" &
           PID=$!
-          trap 'kill $PID' EXIT
+          trap 'kill "$PID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
           for i in $(seq 1 50); do
             if (echo >/dev/tcp/127.0.0.1/8090) >/dev/null 2>&1; then break; fi
             sleep 0.1
           done
+          kill -0 "$PID"
           ./h2spec -h 127.0.0.1 -p 8090 --strict
-
-  bench:
-    if: github.event_name == 'schedule'
-    runs-on: [self-hosted, linux]
-    steps:
-      - uses: actions/checkout@v4
-      - name: nightly bench harness
-        run: Code/bench/run.sh
