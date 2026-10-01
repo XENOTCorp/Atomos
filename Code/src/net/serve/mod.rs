@@ -169,4 +169,3 @@ async fn worker(
     }
     accept_loop(listener, router, ctx, tls).await;
 }
-

@@ -1,7 +1,7 @@
 //! Config checks after parse.
-use std::net::IpAddr;
 use super::Config;
 use crate::error::ServeError;
+use std::net::IpAddr;
 
 pub(crate) fn engine_ok(s: &str) -> bool {
     matches!(s, "epoll" | "tokio" | "xdp" | "af-xdp")
@@ -47,6 +47,12 @@ impl Config {
                     "tls_cert and tls_key must both be set".into(),
                 ));
             }
+        }
+        if self.keyd_sock.is_some() {
+            return Err(ServeError::Config(
+                "keyd_sock is not integrated with TLS; refusing to load private keys in workers"
+                    .into(),
+            ));
         }
         if !engine_ok(&self.engine) {
             return Err(ServeError::Config("unknown engine".into()));

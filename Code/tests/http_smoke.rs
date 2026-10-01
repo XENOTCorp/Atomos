@@ -9,17 +9,16 @@ use atomos::{serve, static_router};
 fn http_get(addr: &str, path: &str) -> (u16, String, Vec<u8>) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).unwrap();
     let sep = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
     let head = std::str::from_utf8(&buf[..sep]).unwrap();
-    let code: u16 = head
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let code: u16 = head.split_whitespace().nth(1).unwrap().parse().unwrap();
     let body = buf[sep + 4..].to_vec();
     (code, head.to_string(), body)
 }

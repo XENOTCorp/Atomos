@@ -48,9 +48,6 @@ async fn upgrade_is_426() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let s = String::from_utf8_lossy(&body);
-    assert!(
-        s.starts_with("HTTP/1.1 426") || s.is_empty(),
-        "{s}"
-    );
+    assert!(s.starts_with("HTTP/1.1 426") || s.is_empty(), "{s}");
     assert!(!s.contains("101"), "{s}");
 }

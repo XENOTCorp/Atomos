@@ -1,11 +1,11 @@
 //! TCP peek: TLS, HTTP/2 preface, or HTTP/1.1.
-use std::sync::Arc;
-use tokio_rustls::TlsAcceptor;
+use super::h1::handle_h1;
+use super::H2_PREFACE;
 use crate::error::ServeError;
 use crate::route::Router;
 use crate::tls::TlsHold;
-use super::H2_PREFACE;
-use super::h1::handle_h1;
+use std::sync::Arc;
+use tokio_rustls::TlsAcceptor;
 
 pub(crate) async fn handle_tcp(
     mut stream: tokio::net::TcpStream,
@@ -32,8 +32,9 @@ pub(crate) async fn handle_tcp(
         }
         return handle_h1(tls_stream, peer, router).await;
     }
-    if router.cfg.http2 && (n >= H2_PREFACE.len() && peek.starts_with(H2_PREFACE)
-        || n >= 3 && peek.starts_with(b"PRI"))
+    if router.cfg.http2
+        && (n >= H2_PREFACE.len() && peek.starts_with(H2_PREFACE)
+            || n >= 3 && peek.starts_with(b"PRI"))
     {
         return crate::h2serve::handle(stream, peer, router).await;
     }
@@ -41,8 +42,8 @@ pub(crate) async fn handle_tcp(
         // Invalid connection preface: GOAWAY PROTOCOL_ERROR then close.
         use tokio::io::AsyncWriteExt;
         const GOAWAY: &[u8] = &[
-            0x00, 0x00, 0x08, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x08, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01,
         ];
         let _ = stream.write_all(GOAWAY).await;
         let _ = stream.shutdown().await;

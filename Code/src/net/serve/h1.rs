@@ -1,18 +1,19 @@
 //! Tokio HTTP/1.1 handler.
-use std::cell::RefCell;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::cache::CachedResponse;
 use crate::encode::{encode_head, encode_response};
 use crate::error::ServeError;
 use crate::error_page::ErrorPage;
 use crate::flags::FlagSet;
 use crate::io::{Body, HeaderView, In, Out};
 use crate::parse::{
-    decode_chunked_into, looks_like_json, parse_request, scan_json, ParseStatus,
+    decode_chunked_into, looks_like_json, parse_request_with_limits, scan_json, ParseStatus,
 };
 use crate::route::Router;
 use crate::status::Status;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 thread_local! {
     static ENC: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(2048));
@@ -27,17 +28,26 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buf = Vec::with_capacity(4096);
-    let timeout = Duration::from_millis(router.cfg.request_timeout_ms.max(1_000));
+    let timeout = Duration::from_millis(router.cfg.request_timeout_ms.max(1));
     let mut tmp = [0u8; 4096];
     loop {
         let (out, used, ka, head) = loop {
-            match parse_request(&buf, router.cfg.max_header_bytes) {
+            match parse_request_with_limits(
+                &buf,
+                router.cfg.max_header_bytes,
+                router.cfg.max_body_bytes,
+            ) {
                 Ok(ParseStatus::Partial) => {
-                    if buf.len() > router.cfg.max_header_bytes {
-                        write_out(&mut stream, &quick_err(400, "headers"), false).await?;
+                    if buf.len()
+                        > router
+                            .cfg
+                            .max_header_bytes
+                            .saturating_add(router.cfg.max_body_bytes)
+                    {
+                        write_out(&mut stream, &quick_err(413, "body"), false).await?;
                         return Ok(());
                     }
-                    let n = read_more(&mut stream, &mut tmp, timeout, buf.is_empty()).await?;
+                    let n = read_more(&mut stream, &mut tmp, timeout).await?;
                     if n == 0 {
                         return Ok(());
                     }
@@ -50,7 +60,7 @@ where
                     }
                     let need = p.wire_end;
                     if buf.len() < need {
-                        let n = read_more(&mut stream, &mut tmp, timeout, false).await?;
+                        let n = read_more(&mut stream, &mut tmp, timeout).await?;
                         if n == 0 {
                             write_out(&mut stream, &quick_err(400, "body"), false).await?;
                             return Ok(());
@@ -61,18 +71,6 @@ where
                     if p.upgrade {
                         write_out(&mut stream, &quick_err(426, "upgrade"), false).await?;
                         return Ok(());
-                    }
-                    if p.content_length == 0 {
-                        if let Some(wire) = router.cache.get_wire(p.method, p.path, p.query) {
-                            let ka = p.keepalive;
-                            drop(p);
-                            stream.write_all(wire.as_ref()).await?;
-                            compact(&mut buf, need);
-                            if !ka {
-                                return Ok(());
-                            }
-                            continue;
-                        }
                     }
                     let mut decoded = Vec::new();
                     let body_bytes: &[u8] = if p.chunked {
@@ -110,19 +108,34 @@ where
                     };
                     let ka = p.keepalive;
                     let head = p.method == crate::io::Method::Head;
+                    if let Some(cached) = router.cached_h1(&req) {
+                        drop(req);
+                        match cached {
+                            CachedResponse::Wire { bytes, .. } => stream.write_all(&bytes).await?,
+                            CachedResponse::Response(out) => {
+                                write_out(&mut stream, &out, head).await?
+                            }
+                        }
+                        compact(&mut buf, need);
+                        if !ka {
+                            return Ok(());
+                        }
+                        continue;
+                    }
                     let t0 = std::time::Instant::now();
-                    let mut out = if router.has_async() {
-                        router.dispatch_async(req).await
-                    } else {
-                        router.dispatch(req)
-                    };
+                    let mut out = tokio::time::timeout(
+                        Duration::from_millis(router.cfg.module_timeout_ms.max(1)),
+                        router.dispatch_async(req),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Out::empty(Status::GATEWAY_TIMEOUT));
                     if t0.elapsed().as_millis() as u64 > router.cfg.module_timeout_ms.max(1) {
                         out = crate::io::Out::empty(crate::status::Status::GATEWAY_TIMEOUT);
                     }
                     break (out, need, ka, head);
                 }
-                Err(_) => {
-                    write_out(&mut stream, &quick_err(400, "parse"), false).await?;
+                Err(error) => {
+                    write_out(&mut stream, &quick_err(error.status(), "parse"), false).await?;
                     return Ok(());
                 }
             }
@@ -139,19 +152,14 @@ pub(crate) async fn read_more<S>(
     stream: &mut S,
     tmp: &mut [u8],
     timeout: Duration,
-    idle: bool,
 ) -> Result<usize, ServeError>
 where
     S: AsyncRead + Unpin,
 {
-    if idle {
-        tokio::time::timeout(timeout, stream.read(tmp))
-            .await
-            .map_err(|_| ServeError::Timeout)?
-            .map_err(ServeError::from)
-    } else {
-        stream.read(tmp).await.map_err(ServeError::from)
-    }
+    tokio::time::timeout(timeout, stream.read(tmp))
+        .await
+        .map_err(|_| ServeError::Timeout)?
+        .map_err(ServeError::from)
 }
 
 pub(crate) fn compact(buf: &mut Vec<u8>, used: usize) {
@@ -186,21 +194,29 @@ where
     if buf.capacity() < 512 {
         buf = Vec::with_capacity(2048);
     }
-    if matches!(out.body, crate::io::OutBody::File(_)) && !head {
-        // Tokio H1 cannot sendfile (generic AsyncWrite, possibly TLS):
-        // materialize the file on a blocking thread, then encode bytes.
-        let mut o = out.clone();
-        o.body = crate::io::OutBody::Raw(crate::proto::materialize_file_body(&o).await);
-        encode_response(&o, &mut buf);
-    } else if head {
-        encode_head(out, &mut buf);
-    } else {
-        encode_response(out, &mut buf);
+    let r = async {
+        if let crate::io::OutBody::File(file) = &out.body {
+            encode_head(out, &mut buf);
+            stream.write_all(&buf).await?;
+            if !head && out.status.allows_body() {
+                let mut chunks = crate::net::file_body::FileChunks::new(file);
+                while let Some(bytes) = chunks.next().await? {
+                    stream.write_all(&bytes).await?;
+                }
+            }
+        } else {
+            if head {
+                encode_head(out, &mut buf);
+            } else {
+                encode_response(out, &mut buf);
+            }
+            stream.write_all(&buf).await?;
+        }
+        Ok::<_, ServeError>(())
     }
-    let r = stream.write_all(&buf).await;
+    .await;
     ENC.with(|cell| {
         let _ = cell.replace(buf);
     });
-    r?;
-    Ok(())
+    r
 }

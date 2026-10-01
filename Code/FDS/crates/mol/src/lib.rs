@@ -31,6 +31,7 @@ pub mod feedback;
 pub mod layout;
 pub mod mem;
 pub mod molecule;
+pub mod pool;
 pub mod ring;
 pub mod simd;
 pub mod stack;

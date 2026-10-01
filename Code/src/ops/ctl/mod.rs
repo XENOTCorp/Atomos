@@ -28,11 +28,11 @@ mod keys;
 mod prompt;
 
 pub use cmd::{parse_json, parse_line, parse_words, Cmd};
+use json::connect_error_json;
 pub use json::{atom_err_msg, atom_error_json, io_error_json, run_json_lines};
+use keys::keys_list;
 pub use keys::random_token;
 pub use prompt::{format_human, help_text, run_repl};
-use json::connect_error_json;
-use keys::keys_list;
 
 #[derive(Debug, Clone)]
 pub struct Env {

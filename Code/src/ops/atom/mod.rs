@@ -13,8 +13,8 @@ use crate::cache::ResponseCache;
 use crate::error::AtomError;
 use crate::rules::Ruleset;
 
-mod pure;
 mod effectful;
+mod pure;
 use effectful::*;
 use pure::*;
 

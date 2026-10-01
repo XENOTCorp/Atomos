@@ -40,10 +40,18 @@ pub(crate) fn shared_bit(a: u16, b: u16) -> u16 {
         return Method::Get.bit();
     }
     if a == METHODS_ALL {
-        return if b == 0 { Method::Get.bit() } else { 1 << b.trailing_zeros() };
+        return if b == 0 {
+            Method::Get.bit()
+        } else {
+            1 << b.trailing_zeros()
+        };
     }
     if b == METHODS_ALL {
-        return if a == 0 { Method::Get.bit() } else { 1 << a.trailing_zeros() };
+        return if a == 0 {
+            Method::Get.bit()
+        } else {
+            1 << a.trailing_zeros()
+        };
     }
     let both = a & b;
     if both == 0 {

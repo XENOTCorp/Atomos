@@ -128,14 +128,24 @@ impl Module for MetricsMod {
         push_metric(&mut body, b"atomos_bytes_out ", s.bytes_out, &mut nbuf);
         push_metric(&mut body, b"atomos_h2_conns ", s.h2_conns, &mut nbuf);
         push_metric(&mut body, b"atomos_h2_streams ", s.h2_streams, &mut nbuf);
-        push_metric(&mut body, b"atomos_h2_headers_raw ", s.h2_headers_raw, &mut nbuf);
+        push_metric(
+            &mut body,
+            b"atomos_h2_headers_raw ",
+            s.h2_headers_raw,
+            &mut nbuf,
+        );
         push_metric(&mut body, b"atomos_h2_body_in ", s.h2_body_in, &mut nbuf);
         push_metric(&mut body, b"atomos_h2_rst ", s.h2_rst, &mut nbuf);
         push_metric(&mut body, b"atomos_h2_wire_in ", s.h2_wire_in, &mut nbuf);
         push_metric(&mut body, b"atomos_h2_wire_out ", s.h2_wire_out, &mut nbuf);
         push_metric(&mut body, b"atomos_h3_conns ", s.h3_conns, &mut nbuf);
         push_metric(&mut body, b"atomos_h3_streams ", s.h3_streams, &mut nbuf);
-        push_metric(&mut body, b"atomos_h3_headers_raw ", s.h3_headers_raw, &mut nbuf);
+        push_metric(
+            &mut body,
+            b"atomos_h3_headers_raw ",
+            s.h3_headers_raw,
+            &mut nbuf,
+        );
         push_metric(&mut body, b"atomos_h3_body_in ", s.h3_body_in, &mut nbuf);
         Ok(Out {
             status: Status::OK,

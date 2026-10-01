@@ -100,7 +100,11 @@ async fn server_drain_finishes_in_flight_refuses_new() {
     std::thread::sleep(Duration::from_millis(40));
     ctx2.run("server.drain", json!({})).unwrap();
     let body = h.join().unwrap();
-    let sl = std::str::from_utf8(&body).unwrap_or("").split("\r\n").next().unwrap_or("");
+    let sl = std::str::from_utf8(&body)
+        .unwrap_or("")
+        .split("\r\n")
+        .next()
+        .unwrap_or("");
     assert!(
         sl.starts_with("HTTP/1.1 200"),
         "in-flight GET must finish, got {sl:?}"

@@ -1,12 +1,14 @@
 //! Per-connection HTTP/1.1 state on an FDS table slot.
+use fds::conn::{ConnectionSlot, CONN_CAP};
+use fds::tcp::TcpStream;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use fds::conn::{ConnectionSlot, CONN_CAP};
-use fds::tcp::TcpStream;
 
 pub(crate) struct Conn<'a> {
     pub(crate) stream: TcpStream,
+    /// Packed slot and generation; stale readiness cannot target a reused slot.
+    pub(crate) token: u64,
     pub(crate) peer: SocketAddr,
     pub(crate) buf: Vec<u8>,
     /// Bytes of `buf` already consumed by completed requests (read
@@ -19,6 +21,8 @@ pub(crate) struct Conn<'a> {
     /// written: the worker keeps writable interest and skips reads
     /// until it completes (request/response order must be preserved).
     pub(crate) pending_sf: Option<PendingSf>,
+    /// Close only after all queued plaintext, file bytes, and TLS records drain.
+    pub(crate) close_after_write: bool,
     /// Last successful read or write. Body and idle timeouts use this.
     pub(crate) last_rw: Instant,
     /// First byte of the current header block. Slowloris uses this
@@ -35,6 +39,12 @@ pub(crate) struct Conn<'a> {
     pub(crate) slot: ConnectionSlot<'a, CONN_CAP>,
 }
 
+impl Conn<'_> {
+    pub(crate) fn has_pending_output(&self) -> bool {
+        !self.out.is_empty() || self.pending_sf.is_some() || super::tlsio::wants_write(self)
+    }
+}
+
 /// Remaining range of an open file to send kernel-side.
 pub(crate) struct PendingSf {
     pub(crate) file: Arc<std::fs::File>,
@@ -42,4 +52,3 @@ pub(crate) struct PendingSf {
     pub(crate) offset: libc::off_t,
     pub(crate) len: u64,
 }
-

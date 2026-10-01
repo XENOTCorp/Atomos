@@ -27,7 +27,9 @@ impl CounterSet {
     pub fn new(names: &[&'static str]) -> Self {
         let mut counters = Vec::with_capacity(names.len());
         for _ in names {
-            counters.push(mol::PaddedCounter::new(std::sync::atomic::AtomicU64::new(0)));
+            counters.push(mol::PaddedCounter::new(std::sync::atomic::AtomicU64::new(
+                0,
+            )));
         }
         CounterSet {
             counters: counters.into_boxed_slice(),

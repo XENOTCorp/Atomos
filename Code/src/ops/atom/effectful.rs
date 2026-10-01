@@ -1,16 +1,16 @@
 //! Effectful atoms. World write through files and signal.
+use super::pure::signal_get;
+use super::AtomCtx;
+use crate::align::{STATE_OFF, STATE_ON};
+use crate::error::AtomError;
+use crate::rules::Ruleset;
+use serde_json::{json, Value};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde_json::{json, Value};
-use super::pure::signal_get;
-use super::AtomCtx;
-use crate::align::{STATE_OFF, STATE_ON};
-use crate::error::AtomError;
-use crate::rules::Ruleset;
 
 /// One audit line: `ts, atom, key_id, old_hash, new_hash`.
 pub(crate) fn audit_line(ctx: &AtomCtx, atom: &str, key_id: &str, old_hash: &str, new_hash: &str) {
@@ -55,10 +55,7 @@ pub(crate) fn audit_append(ctx: &AtomCtx, input: Value) -> Result<Value, AtomErr
         .get("atom")
         .and_then(|v| v.as_str())
         .unwrap_or("audit.append");
-    let key_id = input
-        .get("key_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("-");
+    let key_id = input.get("key_id").and_then(|v| v.as_str()).unwrap_or("-");
     let old_hash = input
         .get("old_hash")
         .and_then(|v| v.as_str())
@@ -75,12 +72,9 @@ pub(crate) fn cache_purge(ctx: &AtomCtx, input: Value) -> Result<Value, AtomErro
     if !ctx.allow_write {
         return Err(AtomError::PureActuate);
     }
-    let key = input
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("*");
+    let key = input.get("id").and_then(|v| v.as_str()).unwrap_or("*");
     if key == "*" {
-        ctx.cache.invalidate();
+        ctx.cache.invalidate_all();
     } else {
         ctx.cache.invalidate_named(key);
     }
@@ -96,6 +90,7 @@ pub(crate) fn rules_reload(ctx: &AtomCtx) -> Result<Value, AtomError> {
     let rs = Ruleset::parse(&raw).map_err(|e| AtomError::Json(e.to_string().into_boxed_str()))?;
     let newh = hash_bytes(&raw);
     ctx.rules.store(Arc::new(rs));
+    ctx.cache.invalidate_all();
     audit_line(ctx, "rules.reload", "rules", "-", &newh);
     Ok(json!({ "ok": true }))
 }
@@ -181,13 +176,7 @@ pub(crate) fn settings_backup(ctx: &AtomCtx, input: Value) -> Result<Value, Atom
         return Err(AtomError::Bound);
     }
     atomic_write_bytes(Path::new(dest), &b)?;
-    audit_line(
-        ctx,
-        "settings.backup",
-        path,
-        &hash_bytes(&b),
-        dest,
-    );
+    audit_line(ctx, "settings.backup", path, &hash_bytes(&b), dest);
     Ok(json!({ "ok": true, "bytes": b.len() }))
 }
 
@@ -308,7 +297,10 @@ pub(crate) fn pointer_del(doc: &mut Value, pointer: &str) -> Result<(), AtomErro
     }
 }
 
-pub(crate) fn walk_mut<'a>(doc: &'a mut Value, parts: &[String]) -> Result<&'a mut Value, AtomError> {
+pub(crate) fn walk_mut<'a>(
+    doc: &'a mut Value,
+    parts: &[String],
+) -> Result<&'a mut Value, AtomError> {
     let mut cur = doc;
     for p in parts {
         cur = match cur {

@@ -30,7 +30,9 @@ fn get(args: &[String], name: &str, default: &str) -> String {
 
 fn pct(mut v: Vec<u64>, p: f64) -> u64 {
     v.sort_unstable();
-    let i = ((v.len() as f64 * p).ceil() as usize).saturating_sub(1).min(v.len().saturating_sub(1));
+    let i = ((v.len() as f64 * p).ceil() as usize)
+        .saturating_sub(1)
+        .min(v.len().saturating_sub(1));
     v.get(i).copied().unwrap_or(0)
 }
 
@@ -140,7 +142,10 @@ async fn h2_phase(addr: SocketAddr, count: usize) {
         }
     }
     let wall = t0.elapsed().as_secs_f64();
-    println!("mux x64: {:.0} req/s (single connection)", count as f64 / wall);
+    println!(
+        "mux x64: {:.0} req/s (single connection)",
+        count as f64 / wall
+    );
     drop(h2);
 
     // HOLB proxy: small GET latency with a 256 KiB-upload sibling stream
@@ -224,9 +229,7 @@ async fn h3_phase(addr: SocketAddr, count: usize) {
         let _ = driver.wait_idle().await;
     });
 
-    async fn get_once(
-        send: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
-    ) -> u64 {
+    async fn get_once(send: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>) -> u64 {
         use bytes::Buf;
         let t0 = Instant::now();
         let req = http::Request::builder()
@@ -275,7 +278,10 @@ async fn h3_phase(addr: SocketAddr, count: usize) {
         }
     }
     let wall = t0.elapsed().as_secs_f64();
-    println!("mux x64: {:.0} req/s (single connection)", count as f64 / wall);
+    println!(
+        "mux x64: {:.0} req/s (single connection)",
+        count as f64 / wall
+    );
 }
 
 /// rustls verifier that accepts the server's self-signed cert (bench

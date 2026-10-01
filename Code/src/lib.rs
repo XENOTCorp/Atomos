@@ -104,7 +104,12 @@ pub fn static_router(cfg: Config, rules: Ruleset) -> (Arc<Router>, Arc<AtomCtx>,
     });
     let sched = {
         let (limits, custom) = cfg.scheduler.build();
-        crate::sched::Sched::sharded(cfg.workers.max(1) as usize, cfg.scheduler.mode, custom, limits)
+        crate::sched::Sched::sharded(
+            cfg.workers.max(1) as usize,
+            cfg.scheduler.mode,
+            custom,
+            limits,
+        )
     };
     let router = Arc::new(Router {
         cache,

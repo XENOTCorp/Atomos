@@ -707,7 +707,9 @@ impl XskSocket {
         // SAFETY: the frame is checked out (not in the fill ring or the
         // kernel's rings), so user space owns it exclusively; the bounds
         // were checked above.
-        unsafe { std::slice::from_raw_parts_mut(self.umem.add(frame.addr as usize), frame.len as usize) }
+        unsafe {
+            std::slice::from_raw_parts_mut(self.umem.add(frame.addr as usize), frame.len as usize)
+        }
     }
 
     /// Transmit a checked-out frame from its umem slot (zero-copy echo:
@@ -963,19 +965,35 @@ impl Drop for XskSocket {
             libc::munmap(self.umem.cast(), self.umem_len);
             libc::munmap(
                 self.rx_base.cast(),
-                ring_map_len(self.offsets.rx.desc, self.ring_size, std::mem::size_of::<XdpDesc>()),
+                ring_map_len(
+                    self.offsets.rx.desc,
+                    self.ring_size,
+                    std::mem::size_of::<XdpDesc>(),
+                ),
             );
             libc::munmap(
                 self.tx_base.cast(),
-                ring_map_len(self.offsets.tx.desc, self.ring_size, std::mem::size_of::<XdpDesc>()),
+                ring_map_len(
+                    self.offsets.tx.desc,
+                    self.ring_size,
+                    std::mem::size_of::<XdpDesc>(),
+                ),
             );
             libc::munmap(
                 self.fill_base.cast(),
-                ring_map_len(self.offsets.fr.desc, self.ring_size, std::mem::size_of::<u64>()),
+                ring_map_len(
+                    self.offsets.fr.desc,
+                    self.ring_size,
+                    std::mem::size_of::<u64>(),
+                ),
             );
             libc::munmap(
                 self.cr_base.cast(),
-                ring_map_len(self.offsets.cr.desc, self.ring_size, std::mem::size_of::<u64>()),
+                ring_map_len(
+                    self.offsets.cr.desc,
+                    self.ring_size,
+                    std::mem::size_of::<u64>(),
+                ),
             );
             libc::close(self.fd);
         }
@@ -1055,10 +1073,7 @@ pub fn process_frame(frame: &mut [u8]) -> FrameAction {
     }
     let ihl = usize::from(frame[14] & 0x0F) * 4;
     let ip_total = ip.total_len as usize;
-    if ihl < 20
-        || ip_total < 20 + 8
-        || 14 + ip_total > frame.len()
-        || 14 + ihl + 8 > 14 + ip_total
+    if ihl < 20 || ip_total < 20 + 8 || 14 + ip_total > frame.len() || 14 + ihl + 8 > 14 + ip_total
     {
         return FrameAction::Drop;
     }
@@ -1256,10 +1271,7 @@ mod tests {
             Err(_) => return, // no device: nothing to test against
         };
         // A synthetic frame inside the umem is addressable.
-        let fake = Frame {
-            addr: 0,
-            len: 64,
-        };
+        let fake = Frame { addr: 0, len: 64 };
         let buf = sock.frame_mut(&fake);
         buf.fill(0xAB);
         assert!(buf.iter().all(|&b| b == 0xAB));

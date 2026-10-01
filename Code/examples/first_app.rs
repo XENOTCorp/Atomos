@@ -24,8 +24,8 @@ use atomos::json_out;
 use atomos::module::{Handler, Module};
 use atomos::num::u64_to_slice;
 use atomos::rules::Ruleset;
-use atomos::status::Status;
 use atomos::static_router;
+use atomos::status::Status;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -104,8 +104,7 @@ impl Module for Post {
     }
     fn handle(&self, _req: &In<'_>) -> Result<Out, ServeError> {
         let mut out = Out::empty(Status::OK);
-        out.headers
-            .push(("X-Atomos".into(), "first-app".into()));
+        out.headers.push(("X-Atomos".into(), "first-app".into()));
         Ok(out)
     }
 }

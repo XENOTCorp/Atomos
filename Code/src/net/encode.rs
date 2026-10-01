@@ -26,14 +26,16 @@ fn encode(out: &Out, dst: &mut Vec<u8>, head: bool) {
     let phrase = out
         .reason
         .as_deref()
+        .filter(|phrase| crate::net::headers::valid_value(phrase))
         .unwrap_or_else(|| out.status.phrase());
     dst.extend_from_slice(phrase.as_bytes());
     dst.extend_from_slice(b"\r\n");
-    let stream = matches!(out.body, OutBody::Stream(_));
+    let has_body = out.status.allows_body();
+    let stream = has_body && matches!(out.body, OutBody::Stream(_));
     if stream {
         dst.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
-    } else {
-        let body_len = out.body.len();
+    } else if has_body || out.status == crate::status::Status::RESET_CONTENT {
+        let body_len = if has_body { out.body.len() } else { 0 };
         dst.extend_from_slice(b"Content-Length: ");
         let n = usize_to_slice(body_len, &mut nb);
         dst.extend_from_slice(&nb[..n]);
@@ -41,13 +43,19 @@ fn encode(out: &Out, dst: &mut Vec<u8>, head: bool) {
     }
     dst.extend_from_slice(b"Connection: keep-alive\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n");
     for (k, v) in &out.headers {
+        if crate::net::headers::transport_owned(k)
+            || !crate::net::headers::valid_name(k)
+            || !crate::net::headers::valid_value(v)
+        {
+            continue;
+        }
         dst.extend_from_slice(k.as_bytes());
         dst.extend_from_slice(b": ");
         dst.extend_from_slice(v.as_bytes());
         dst.extend_from_slice(b"\r\n");
     }
     dst.extend_from_slice(b"\r\n");
-    if !head && !stream {
+    if has_body && !head && !stream {
         dst.extend_from_slice(out.body.as_bytes());
     }
 }
@@ -88,10 +96,10 @@ fn hex_usize(n: usize, dst: &mut [u8; 16]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crate::flags::FlagSet;
     use crate::io::{CacheDirective, Out, OutBody};
     use crate::status::Status;
+    use bytes::Bytes;
 
     #[test]
     fn encode_one_buffer_has_length_and_body() {

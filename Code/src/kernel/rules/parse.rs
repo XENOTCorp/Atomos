@@ -1,7 +1,7 @@
 //! JSON ruleset parse. Pack wire rules. No match.
-use serde::Deserialize;
-use crate::io::Method;
 use super::RuleError;
+use crate::io::Method;
+use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct HeaderRule {

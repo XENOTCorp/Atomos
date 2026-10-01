@@ -1,11 +1,5 @@
-//! HTTP/2 prior-knowledge (h2c) and HTTP/2 over TLS. Dispatches through `Router`.
-//!
-//! The `h2` crate hides HPACK and framing internals, so datapath
-//! observability is measured at the app boundary: raw header bytes per
-//! request (exact) and wire bytes per connection (a counting IO
-//! wrapper). The ratio over repeated identical requests is a real
-//! HPACK-compression proxy (static-table hits shrink the wire side).
-
+//! HTTP/2 transport with bounded DATA queues and concurrent request/response
+//! streaming. Protocol-independent dispatch and file reads live in sibling modules.
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -21,8 +15,6 @@ use crate::io::OutBody;
 use crate::proto;
 use crate::route::Router;
 
-/// Counts every byte crossing the connection (handshake, HPACK header
-/// blocks, frames, bodies): the wire-side of the compression proxy.
 pub struct CountingIo<S> {
     inner: S,
     rx: Arc<LineAtomicU64>,
@@ -42,13 +34,13 @@ impl<S: AsyncRead + Unpin> AsyncRead for CountingIo<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let before = buf.filled().len();
-        let res = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if res.is_ready() {
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if result.is_ready() {
             self.rx
                 .v
                 .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
         }
-        res
+        result
     }
 }
 
@@ -58,51 +50,49 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CountingIo<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let res = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(n)) = res {
-            self.tx.v.fetch_add(n as u64, Ordering::Relaxed);
+        let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(len)) = result {
+            self.tx.v.fetch_add(len as u64, Ordering::Relaxed);
         }
-        res
+        result
     }
 
-    fn poll_flush(
+    fn poll_write_vectored(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
+        if let Poll::Ready(Ok(len)) = result {
+            self.tx.v.fetch_add(len as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
-}
-
-/// Raw (uncompressed) header bytes for the request line + headers.
-fn raw_header_bytes(head: &http::request::Parts) -> u64 {
-    let mut n = head.method.as_str().len() + head.uri.path().len();
-    for (name, value) in head.headers.iter() {
-        n += name.as_str().len() + value.as_bytes().len() + 4;
-    }
-    n as u64
 }
 
 pub async fn handle<S>(io: S, peer: SocketAddr, router: Arc<Router>) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // Connection admission (integer scheduler): per-IP + global caps.
-    let Some(_conn_guard) = router.admit_conn(peer) else {
+    let Some(_guard) = router.admit_conn(peer) else {
         return Ok(());
     };
     let rx = Arc::new(LineAtomicU64::new(0));
     let tx = Arc::new(LineAtomicU64::new(0));
     let counted = CountingIo::new(io, rx.clone(), tx.clone());
     let mut conn = h2::server::Builder::new()
-        .max_concurrent_streams(256)
-        .max_header_list_size(16 * 1024)
+        .max_concurrent_streams(router.cfg.scheduler.str_max.min(256))
+        .max_header_list_size(u32::try_from(router.cfg.max_header_bytes).unwrap_or(u32::MAX))
         .max_frame_size(16 * 1024)
         .max_concurrent_reset_streams(32)
         .max_pending_accept_reset_streams(20)
@@ -111,15 +101,15 @@ where
         .await
         .map_err(h2_err)?;
     router.metrics.h2_conns.v.fetch_add(1, Ordering::Relaxed);
-    while let Some(req) = conn.accept().await {
-        let (req, mut respond) = req.map_err(h2_err)?;
+    while let Some(request) = conn.accept().await {
+        let (request, mut respond) = request.map_err(h2_err)?;
         let router = router.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_one(req, &mut respond, peer, router.clone()).await {
-                if e.is_reset() {
+            if let Err(error) = serve_one(request, &mut respond, peer, router.clone()).await {
+                if is_reset(&error) {
                     router.metrics.h2_rst.v.fetch_add(1, Ordering::Relaxed);
                 }
-                tracing::debug!(%e, "h2 stream");
+                tracing::debug!(%error, "h2 stream");
             }
         });
     }
@@ -137,147 +127,115 @@ where
 }
 
 async fn serve_one(
-    req: http::Request<h2::RecvStream>,
+    request: http::Request<h2::RecvStream>,
     respond: &mut h2::server::SendResponse<Bytes>,
     peer: SocketAddr,
     router: Arc<Router>,
 ) -> Result<(), ServeError> {
-    let (head, recv) = req.into_parts();
+    let (head, mut recv) = request.into_parts();
+    let head_only = head.method == http::Method::HEAD;
     router.metrics.h2_streams.v.fetch_add(1, Ordering::Relaxed);
     router
         .metrics
         .h2_headers_raw
         .v
-        .fetch_add(raw_header_bytes(&head), Ordering::Relaxed);
-    // Streaming dispatch: the module sees body chunks as they arrive
-    // (mpsc) and may answer with an `OutBody::Stream`. The feed task
-    // forwards the request body while the dispatch task runs, so a
-    // streaming module processes data as it comes in.
+        .fetch_add(proto::raw_header_bytes(&head), Ordering::Relaxed);
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
-    let router2 = router.clone();
-    let max_body = router.cfg.max_body_bytes;
-    // `head` is moved into the task (no per-request HeaderMap clone;
-    // raw_header_bytes above already consumed it).
-    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, head, peer, rx).await });
-    let mut feed = tokio::spawn(async move {
-        let mut body_len: usize = 0;
-        let mut recv = recv;
+    let feed = async {
+        let mut body_len = 0usize;
         while let Some(chunk) = recv.data().await {
             let chunk = chunk.map_err(h2_err)?;
-            body_len += chunk.len();
-            if body_len > max_body {
+            if chunk.len() > router.cfg.max_body_bytes.saturating_sub(body_len) {
                 return Err(ServeError::BodyTooLarge);
             }
-            let _ = recv.flow_control().release_capacity(chunk.len());
+            body_len += chunk.len();
+            recv.flow_control()
+                .release_capacity(chunk.len())
+                .map_err(h2_err)?;
             if tx.send(chunk).await.is_err() {
-                break; // module closed its side (or gave up)
+                break;
             }
         }
-        Ok(body_len)
-    });
-    let out = match task.await {
-        Ok(out) => out,
-        Err(_) => return Err(ServeError::Io(std::io::Error::other("stream task"))),
+        drop(tx);
+        Ok::<_, ServeError>(body_len)
     };
-    let http_res = proto::out_to_http(&out);
-    let eos = matches!(out.body, OutBody::Empty);
-    let mut send = respond.send_response(http_res, eos).map_err(h2_err)?;
-    match out.body {
-        OutBody::Stream(s) => {
-            let mut out_rx = s.take();
-            let mut feed_done = false;
-            let mut body_len: usize = 0;
-            loop {
-                tokio::select! {
-                    r = &mut feed, if !feed_done => {
-                        feed_done = true;
-                        body_len = match r {
-                            Ok(Ok(n)) => n,
-                            Ok(Err(e)) => {
-                                send.send_reset(h2::Reason::REFUSED_STREAM);
-                                return Err(e);
-                            }
-                            Err(_) => 0,
-                        };
-                    }
-                    chunk = out_rx.recv() => {
-                        match chunk {
-                            Some(c) => send.send_data(c, false).map_err(h2_err)?,
-                            None => {
-                                // Module finished; wait for the body feed
-                                // to complete so the stream is fully
-                                // consumed before we end the response.
-                                if !feed_done {
-                                    body_len = match (&mut feed).await {
-                                        Ok(Ok(n)) => n,
-                                        Ok(Err(e)) => {
-                                            send.send_reset(h2::Reason::REFUSED_STREAM);
-                                            return Err(e);
-                                        }
-                                        Err(_) => 0,
-                                    };
-                                }
-                                send.send_data(Bytes::new(), true).map_err(h2_err)?;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            router
-                .metrics
-                .h2_body_in
-                .v
-                .fetch_add(body_len as u64, Ordering::Relaxed);
+    let response = async {
+        let out = proto::stream_dispatch(&router, head, peer, rx).await;
+        let end = head_only || !out.status.allows_body() || matches!(out.body, OutBody::Empty);
+        let mut send = respond
+            .send_response(proto::out_to_http(&out), end)
+            .map_err(h2_err)?;
+        if end {
+            return Ok(());
         }
-        _ => {
-            // Buffered response: drain the body feed, then send once.
-            let body_len = match feed.await {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => {
-                    send.send_reset(h2::Reason::REFUSED_STREAM);
-                    return Err(e);
+        match &out.body {
+            OutBody::Stream(body) => {
+                let mut chunks = body.take();
+                while let Some(bytes) = chunks.recv().await {
+                    send_data_bounded(&mut send, bytes, false).await?;
                 }
-                Err(_) => 0,
-            };
-            router
-                .metrics
-                .h2_body_in
-                .v
-                .fetch_add(body_len as u64, Ordering::Relaxed);
-            if !eos {
-                let body = if matches!(out.body, OutBody::File(_)) {
-                    crate::proto::materialize_file_body(&out).await
-                } else {
-                    // Refcount bump, not a copy (the cache already holds
-                    // the response body as Bytes).
-                    out.body.to_bytes().unwrap_or_default()
-                };
-                send.send_data(body, true).map_err(h2_err)?;
+                send.send_data(Bytes::new(), true).map_err(h2_err)?;
+            }
+            OutBody::File(file) => {
+                let mut chunks = crate::net::file_body::FileChunks::new(file);
+                while let Some(bytes) = chunks.next().await? {
+                    send_data_bounded(&mut send, bytes, false).await?;
+                }
+                send.send_data(Bytes::new(), true).map_err(h2_err)?;
+            }
+            _ => {
+                send_data_bounded(&mut send, out.body.to_bytes().unwrap_or_default(), true).await?
             }
         }
+        Ok::<_, ServeError>(())
+    };
+    // No nested per-stream tasks: both halves make progress in this task and
+    // cancellation/error drops the sibling's channels and borrowed resources.
+    let (body_len, ()) = tokio::try_join!(feed, response)?;
+    router
+        .metrics
+        .h2_body_in
+        .v
+        .fetch_add(body_len as u64, Ordering::Relaxed);
+    Ok(())
+}
+
+async fn send_data_bounded(
+    send: &mut h2::SendStream<Bytes>,
+    mut data: Bytes,
+    end: bool,
+) -> Result<(), ServeError> {
+    if data.is_empty() {
+        send.send_data(data, end).map_err(h2_err)?;
+        return Ok(());
+    }
+    while !data.is_empty() {
+        send.reserve_capacity(data.len().min(64 * 1024));
+        if send.capacity() == 0 {
+            std::future::poll_fn(|cx| send.poll_capacity(cx))
+                .await
+                .ok_or_else(|| ServeError::Io(std::io::Error::other("h2 stream closed")))?
+                .map_err(h2_err)?;
+            continue;
+        }
+        let len = send.capacity().min(data.len());
+        let bytes = data.split_to(len);
+        send.send_data(bytes, end && data.is_empty())
+            .map_err(h2_err)?;
     }
     Ok(())
 }
 
-/// `h2::Error` with an associated `Reason` is a RST_STREAM event
-/// (received or sent): counted as the RST_STREAM rate.
-trait ResetTrait {
-    fn is_reset(&self) -> bool;
-}
-
-impl ResetTrait for ServeError {
-    fn is_reset(&self) -> bool {
-        match self {
-            ServeError::Io(e) => e
-                .get_ref()
-                .and_then(|r| r.downcast_ref::<h2::Error>())
-                .is_some_and(|e| e.reason().is_some()),
-            _ => false,
-        }
+fn is_reset(error: &ServeError) -> bool {
+    match error {
+        ServeError::Io(error) => error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<h2::Error>())
+            .is_some_and(|error| error.reason().is_some()),
+        _ => false,
     }
 }
 
-fn h2_err(e: h2::Error) -> ServeError {
-    ServeError::Io(std::io::Error::other(e))
+fn h2_err(error: h2::Error) -> ServeError {
+    ServeError::Io(std::io::Error::other(error))
 }

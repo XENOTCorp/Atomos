@@ -6,9 +6,7 @@ use atomos::{serve, static_router};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let root = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "static".into());
+    let root = std::env::args().nth(1).unwrap_or_else(|| "static".into());
     let bind = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "127.0.0.1:0".into());

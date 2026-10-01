@@ -125,8 +125,7 @@ async fn h3_get_index() {
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![b"h3".to_vec()];
     let client_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap();
-    let mut endpoint =
-        quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client ep");
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client ep");
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_crypto)));
     let conn = endpoint
         .connect(addr, "localhost")
@@ -167,7 +166,7 @@ use atomos::io::{CacheDirective, Out, OutBody, StreamBody};
 use atomos::module::{AsyncStreamModule, BoxFut, Handler, ModuleMap};
 use atomos::status::Status;
 
-/// Echoes each request-body chunk straight into the response stream : 
+/// Echoes each request-body chunk straight into the response stream :
 /// data flows out as it comes in (no whole-body buffering).
 struct EchoStream;
 
@@ -195,9 +194,9 @@ impl AsyncStreamModule for EchoStream {
                 status: Status::OK,
                 reason: None,
                 headers: vec![],
-                body: OutBody::Stream(StreamBody(std::sync::Arc::new(
-                    parking_lot::Mutex::new(Some(rx)),
-                ))),
+                body: OutBody::Stream(StreamBody(std::sync::Arc::new(parking_lot::Mutex::new(
+                    Some(rx),
+                )))),
                 cache: CacheDirective::No,
                 flags: FlagSet::empty(),
             })
@@ -227,7 +226,10 @@ async fn h2c_streaming_echo() {
     let (router, ctx, _) = static_router(cfg, rules);
     // Register the streaming module (hot-swap into the modules map).
     let mut m: ModuleMap = (**router.modules.load()).clone();
-    m.insert("stream".into(), Handler::Stream(std::sync::Arc::new(EchoStream)));
+    m.insert(
+        "stream".into(),
+        Handler::Stream(std::sync::Arc::new(EchoStream)),
+    );
     router.modules.store(std::sync::Arc::new(m));
     tokio::spawn(async move {
         let _ = serve::run(router, ctx).await;
@@ -259,9 +261,7 @@ async fn h2c_streaming_echo() {
             .expect("data");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    send_body
-        .send_data(bytes::Bytes::new(), true)
-        .expect("eos");
+    send_body.send_data(bytes::Bytes::new(), true).expect("eos");
     let resp = resp.await.expect("resp");
     assert_eq!(resp.status(), 200);
     let mut recv = resp.into_body();
@@ -269,5 +269,8 @@ async fn h2c_streaming_echo() {
     while let Some(c) = recv.data().await {
         body.extend_from_slice(&c.expect("data"));
     }
-    assert_eq!(body, b"one-two-three", "streamed echo must match the request body");
+    assert_eq!(
+        body, b"one-two-three",
+        "streamed echo must match the request body"
+    );
 }

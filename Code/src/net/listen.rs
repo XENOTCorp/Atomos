@@ -89,9 +89,7 @@ mod tests {
             },
         )
         .unwrap();
-        let nodelay = socket2::SockRef::from(&b.listener)
-            .nodelay()
-            .unwrap();
+        let nodelay = socket2::SockRef::from(&b.listener).nodelay().unwrap();
         assert!(nodelay);
         let local = b.local;
         assert!(local.ip().is_loopback());

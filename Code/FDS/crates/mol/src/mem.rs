@@ -27,7 +27,7 @@ pub fn huge_page(len: usize) -> Option<HugePageGuard> {
 
     // Round to a 4 KiB page so MAP_HUGETLB (2 MiB) can succeed when the
     // kernel provides huge pages; the fallback accepts any length.
-    let len = len.next_multiple_of(4096);
+    let len = len.checked_next_multiple_of(4096)?.max(4096);
 
     // Attempt a private anonymous mapping, advised with MADV_HUGEPAGE so
     // THP can back it with 2 MiB pages when available (never required).
@@ -94,8 +94,12 @@ unsafe impl Send for HugePageGuard {}
 /// Use only after every byte of the value is initialized (zeroed values
 /// are valid only for types where the all-zero bit pattern is valid,
 /// e.g. integers, fixed arrays of integers).
+///
+/// # Safety
+/// The all-zero bit pattern must be valid for T. Copy alone is insufficient
+/// (references and NonZero integers are Copy but cannot be zero).
 #[inline]
-pub fn zeroed<T: Copy>(out: &mut core::mem::MaybeUninit<T>) {
+pub unsafe fn zeroed<T: Copy>(out: &mut core::mem::MaybeUninit<T>) {
     // SAFETY: caller guarantees the zeroed pattern is valid for T.
     unsafe {
         out.write(core::mem::zeroed());

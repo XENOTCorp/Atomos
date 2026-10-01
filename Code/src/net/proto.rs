@@ -12,6 +12,20 @@ use crate::parse::{looks_like_json, scan_json};
 use crate::route::Router;
 use crate::status::Status;
 
+/// Uncompressed header-size estimate at the application boundary, shared by
+/// both protocols. This is not an exact HPACK/QPACK encoded size.
+pub fn raw_header_bytes(head: &http::request::Parts) -> u64 {
+    let path = head
+        .uri
+        .path_and_query()
+        .map_or(1, |path| path.as_str().len());
+    let mut bytes = head.method.as_str().len() + path;
+    for (name, value) in &head.headers {
+        bytes += name.as_str().len() + value.as_bytes().len() + 4;
+    }
+    bytes as u64
+}
+
 /// Request head, borrowed from the `http::Request`: no per-header
 /// `String` copies on the tokio paths (the H1 path's zero-alloc
 /// discipline applied to H2/H3 dispatch).
@@ -46,11 +60,6 @@ pub fn parts_from_http<'a>(req: &'a http::Request<Bytes>) -> Result<Parts<'a>, S
 }
 
 pub async fn dispatch_parts(router: &Router, parts: Parts<'_>, peer: SocketAddr) -> Out {
-    // Integer scheduler gate (firewall + admission); same policy as the
-    // H1 path (`Router::dispatch`). 429 when rejected/backlogged.
-    let Some(_guard) = router.admit(peer) else {
-        return page(router, 429, "scheduler");
-    };
     if parts.body.len() > router.cfg.max_body_bytes {
         return page(router, 413, "body");
     }
@@ -82,11 +91,7 @@ pub async fn dispatch_parts(router: &Router, parts: Parts<'_>, peer: SocketAddr)
         peer,
         flags: FlagSet::empty(),
     };
-    if router.has_async() {
-        router.dispatch_async(req).await
-    } else {
-        router.dispatch(req)
-    }
+    router.dispatch_async(req).await
 }
 
 /// Streaming dispatch for the tokio paths (h2/h3). The request head is
@@ -101,21 +106,20 @@ pub async fn stream_dispatch(
     peer: SocketAddr,
     body_rx: tokio::sync::mpsc::Receiver<Bytes>,
 ) -> Out {
-    if let Some(h) = router.stream_handler(&head.method, head.uri.path()) {
-        // Integer scheduler gate, held for the whole streamed exchange.
-        let Some(_guard) = router.admit(peer) else {
-            return page(router, 429, "scheduler");
-        };
+    if router
+        .stream_handler(&head.method, head.uri.path())
+        .is_some()
+    {
         let req = http::Request::from_parts(head, ());
-        match h.handle_streaming(&req, body_rx).await {
-            Ok(out) => out,
-            Err(e) => page(router, e.status(), "stream"),
-        }
+        router.dispatch_streaming(&req, peer, body_rx).await
     } else {
         // Buffered fallback: collect the channel, then the normal path.
         let mut body = bytes::BytesMut::new();
         let mut rx = body_rx;
         while let Some(c) = rx.recv().await {
+            if c.len() > router.cfg.max_body_bytes.saturating_sub(body.len()) {
+                return page(router, 413, "body");
+            }
             body.extend_from_slice(&c);
         }
         let req = http::Request::from_parts(head, body.freeze());
@@ -126,28 +130,11 @@ pub async fn stream_dispatch(
     }
 }
 
-/// Materialize a `File` body for the tokio paths, which cannot sendfile
-/// (H2/H3 framing and TLS need the bytes in memory). The blocking read
-/// runs on a blocking thread so a current-thread worker is not stalled.
-/// Returns an empty body if the file cannot be read (the fd was valid
-/// at dispatch; only an I/O error mid-read can get here).
-pub async fn materialize_file_body(out: &Out) -> Bytes {
-    match &out.body {
-        OutBody::File(f) => {
-            let f = f.clone();
-            tokio::task::spawn_blocking(move || f.read_to_bytes().unwrap_or_default())
-                .await
-                .unwrap_or_default()
-        }
-        _ => Bytes::new(),
-    }
-}
-
 pub fn out_to_http(out: &Out) -> http::Response<()> {
     let mut b = http::Response::builder().status(out.status.as_u16());
     if let Some(hs) = b.headers_mut() {
         for (k, v) in &out.headers {
-            if hop_by_hop(k) {
+            if crate::net::headers::transport_owned(k) {
                 continue;
             }
             let Ok(name) = HeaderName::from_bytes(k.as_bytes()) else {
@@ -159,20 +146,15 @@ pub fn out_to_http(out: &Out) -> http::Response<()> {
             hs.append(name, val);
         }
     }
+    if !matches!(out.body, OutBody::Stream(_)) && out.status.allows_body() {
+        b = b.header(http::header::CONTENT_LENGTH, out.body.len());
+    }
     b.body(()).unwrap_or_else(|_| {
         http::Response::builder()
             .status(500)
             .body(())
             .unwrap_or_else(|_| http::Response::new(()))
     })
-}
-
-fn hop_by_hop(k: &str) -> bool {
-    k.eq_ignore_ascii_case("connection")
-        || k.eq_ignore_ascii_case("keep-alive")
-        || k.eq_ignore_ascii_case("proxy-connection")
-        || k.eq_ignore_ascii_case("transfer-encoding")
-        || k.eq_ignore_ascii_case("upgrade")
 }
 
 fn page(router: &Router, code: u16, detail: &str) -> Out {

@@ -1,7 +1,7 @@
 //! Cache-line isolation for shared atomics. Prevents false sharing.
 //! Domain: process-wide signals and per-worker counters. Criticality C2.
 
-use std::sync::atomic::{AtomicU8, AtomicU64};
+use std::sync::atomic::{AtomicU64, AtomicU8};
 
 pub const STATE_OFF: u8 = 0;
 pub const STATE_ON: u8 = 1;

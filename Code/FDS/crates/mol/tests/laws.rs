@@ -194,7 +194,7 @@ fn step_is_deterministic() {
 fn spsc_ring_is_fifo_across_wraparound() {
     // FIFO order, including across slot-index wraparound (CAP 16,
     // occupancy ≤ 15). This is not the stack equation push;pop = id.
-    let ring = SpscRing::<u64, 16>::new();
+    let mut ring = SpscRing::<u64, 16>::new();
     let mut next_push = 0u64;
     let mut next_pop = 0u64;
     for _ in 0..5 {
@@ -229,7 +229,7 @@ fn spsc_ring_is_fifo_across_wraparound() {
 #[test]
 fn spsc_fifo_push_pop_is_not_id_on_nonempty() {
     // Thesis: FIFO content fails push;pop = id on every nonempty buffer.
-    let ring = SpscRing::<u32, 8>::new();
+    let mut ring = SpscRing::<u32, 8>::new();
     assert!(ring.try_push(1).is_ok());
     assert!(ring.try_push(2).is_ok());
     assert_eq!(
@@ -242,7 +242,7 @@ fn spsc_fifo_push_pop_is_not_id_on_nonempty() {
 
 #[test]
 fn spsc_occupancy_at_most_cap_minus_one() {
-    let ring = SpscRing::<u32, 8>::new();
+    let mut ring = SpscRing::<u32, 8>::new();
     for i in 0..7 {
         assert!(ring.try_push(i).is_ok());
     }

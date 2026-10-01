@@ -8,7 +8,7 @@ use bytes::{Buf, Bytes};
 
 use crate::atom::AtomCtx;
 use crate::error::ServeError;
-use crate::io::{Out, OutBody};
+use crate::io::OutBody;
 use crate::proto;
 use crate::route::Router;
 use crate::tls::TlsSet;
@@ -76,15 +76,6 @@ async fn handle_conn(
     Ok(())
 }
 
-/// Raw (uncompressed) header bytes for the request line + headers.
-fn raw_header_bytes(head: &http::request::Parts) -> u64 {
-    let mut n = head.method.as_str().len() + head.uri.path().len();
-    for (name, value) in head.headers.iter() {
-        n += name.as_str().len() + value.as_bytes().len() + 4;
-    }
-    n as u64
-}
-
 async fn serve_one<C>(
     resolver: h3::server::RequestResolver<C, Bytes>,
     peer: SocketAddr,
@@ -101,92 +92,65 @@ where
         .metrics
         .h3_headers_raw
         .v
-        .fetch_add(raw_header_bytes(&head), Ordering::Relaxed);
-    // Split into send/recv halves: the feed runs inline (the recv half
-    // is not `Send`); this task streams the response out.
+        .fetch_add(proto::raw_header_bytes(&head), Ordering::Relaxed);
+    let head_only = head.method == http::Method::HEAD;
     let (mut send_half, mut recv_half) = stream.split();
-    // Streaming dispatch: body chunks flow to the module as they
-    // arrive; the module may answer with `OutBody::Stream`. The recv
-    // half is not `Send`, so the feed runs inline in the select.
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
-    let mut tx = Some(tx);
-    let router2 = router.clone();
-    let max_body = router.cfg.max_body_bytes;
-    // `head` is moved into the task (no per-request HeaderMap clone).
-    let task = tokio::spawn(async move { proto::stream_dispatch(&router2, head, peer, rx).await });
-    // Run the dispatch task and the body feed concurrently (the recv
-    // half is not `Send`, so the feed lives inline here): body chunks
-    // reach the module as they arrive, and the task completes when the
-    // channel closes (buffered fallback) or promptly (streaming module).
-    let mut task = task;
-    let mut out: Option<Out> = None;
-    let mut body_len: usize = 0;
-    loop {
-        tokio::select! {
-            r = &mut task, if out.is_none() => {
-                out = Some(match r {
-                    Ok(o) => o,
-                    Err(_) => return Err(ServeError::Io(std::io::Error::other("stream task"))),
-                });
+    let feed = async {
+        let mut body_len = 0usize;
+        while let Some(mut chunk) = recv_half.recv_data().await.map_err(h3_err)? {
+            let len = chunk.remaining();
+            if len > router.cfg.max_body_bytes.saturating_sub(body_len) {
+                return Err(ServeError::BodyTooLarge);
             }
-            chunk = recv_half.recv_data(), if tx.is_some() => {
-                match chunk {
-                    Ok(Some(mut c)) => {
-                        let n = c.remaining();
-                        body_len += n;
-                        if body_len > max_body {
-                            return Err(ServeError::BodyTooLarge);
-                        }
-                        let b = Bytes::copy_from_slice(c.chunk());
-                        c.advance(n);
-                        if let Some(t) = &tx {
-                            if t.send(b).await.is_err() {
-                                tx = None; // module closed early
-                            }
-                        }
+            body_len += len;
+            // Buf may be segmented; chunk() need not cover remaining().
+            if tx.send(chunk.copy_to_bytes(len)).await.is_err() {
+                break;
+            }
+        }
+        drop(tx);
+        Ok::<_, ServeError>(body_len)
+    };
+    let respond = async {
+        let out = proto::stream_dispatch(&router, head, peer, rx).await;
+        send_half
+            .send_response(proto::out_to_http(&out))
+            .await
+            .map_err(h3_err)?;
+        if !head_only && out.status.allows_body() {
+            match &out.body {
+                OutBody::Stream(body) => {
+                    let mut chunks = body.take();
+                    while let Some(chunk) = chunks.recv().await {
+                        send_half.send_data(chunk).await.map_err(h3_err)?;
                     }
-                    Ok(None) => {
-                        tx = None; // drop the sender: closes the channel
+                }
+                OutBody::File(file) => {
+                    let mut chunks = crate::net::file_body::FileChunks::new(file);
+                    while let Some(bytes) = chunks.next().await? {
+                        send_half.send_data(bytes).await.map_err(h3_err)?;
                     }
-                    Err(e) => return Err(h3_err(e)),
+                }
+                _ => {
+                    let bytes = out.body.to_bytes().unwrap_or_default();
+                    if !bytes.is_empty() {
+                        send_half.send_data(bytes).await.map_err(h3_err)?;
+                    }
                 }
             }
         }
-        if out.is_some() && tx.is_none() {
-            break;
-        }
-    }
-    let out = out.expect("dispatch task completed");
+        send_half.finish().await.map_err(h3_err)
+    };
+    // Drain responses while request data is still arriving. Waiting for all
+    // input first deadlocks modules with bounded input/output channels.
+    // try_join also cancels the sibling on error: no detached dispatch task.
+    let (body_len, ()) = tokio::try_join!(feed, respond)?;
     router
         .metrics
         .h3_body_in
         .v
         .fetch_add(body_len as u64, Ordering::Relaxed);
-    let http_res = proto::out_to_http(&out);
-    send_half.send_response(http_res).await.map_err(h3_err)?;
-    match out.body {
-        OutBody::Stream(s) => {
-            // The module produced chunks while the body was feeding;
-            // flush them all, then finish.
-            let mut out_rx = s.take();
-            while let Some(c) = out_rx.recv().await {
-                send_half.send_data(c).await.map_err(h3_err)?;
-            }
-        }
-        _ => {
-            let body = if matches!(out.body, OutBody::File(_)) {
-                crate::proto::materialize_file_body(&out).await
-            } else {
-                // Refcount bump, not a copy (the cache already holds
-                // the response body as Bytes).
-                out.body.to_bytes().unwrap_or_default()
-            };
-            if !body.is_empty() {
-                send_half.send_data(body).await.map_err(h3_err)?;
-            }
-        }
-    }
-    send_half.finish().await.map_err(h3_err)?;
     Ok(())
 }
 

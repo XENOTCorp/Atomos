@@ -2,7 +2,7 @@
 
 Release profile: opt-level 3, thin LTO, codegen-units 1, panic abort, strip.
 
-CPU flags come from `./compile.sh` (`Code/scripts/cpu-rustflags.sh`). The script sets `target-cpu=native` and SIMD names from `/proc/cpuinfo`. It does not write a microarch name.
+CPU flags come from `./compile.sh` (`Code/scripts/cpu-rustflags.sh`). The script sets `target-cpu=native`, letting rustc select supported host features. SIMD names from `/proc/cpuinfo` are reported for diagnostics only; the script does not inject unstable target features or write a microarch name.
 
 The governor reads RSS through `/proc/self/status` with a 100 ms cache. `memory_mode: hard` returns 503 over the cap. `degrade` sets `FLAG_DEGRADED`.
 

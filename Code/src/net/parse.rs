@@ -71,10 +71,15 @@ fn scan_header_block(buf: &[u8], max_header: usize) -> Result<Option<usize>, Ser
         }
         if !first {
             // name TAB or space before colon
-            let colon = line.iter().position(|&b| b == b':').ok_or(ServeError::Parse)?;
+            let colon = line
+                .iter()
+                .position(|&b| b == b':')
+                .ok_or(ServeError::Parse)?;
             let name = &line[..colon];
             if name.is_empty()
-                || name.iter().any(|&b| b == b'\t' || b == b' ' || b == 0 || b > 127)
+                || name
+                    .iter()
+                    .any(|&b| b == b'\t' || b == b' ' || b == 0 || b > 127)
             {
                 return Err(ServeError::Parse);
             }
@@ -161,72 +166,20 @@ fn connection_has(val: &str, token: &str) -> bool {
     val.split(',').any(|p| p.trim().eq_ignore_ascii_case(token))
 }
 
-/// Walk a chunked body. No chunk extensions. No trailers.
-/// `Ok(None)` = need more bytes. `Ok(Some((decoded, wire)))` = complete.
-pub fn measure_chunked(src: &[u8]) -> Result<Option<(usize, usize)>, ServeError> {
-    let mut i = 0usize;
-    let mut decoded = 0usize;
-    loop {
-        let Some(nl) = src[i..].windows(2).position(|w| w == b"\r\n") else {
-            return Ok(None);
-        };
-        let line = &src[i..i + nl];
-        if line.contains(&b';') {
-            return Err(ServeError::Parse);
-        }
-        if line.is_empty() {
-            return Err(ServeError::Parse);
-        }
-        let size = usize::from_str_radix(std::str::from_utf8(line).map_err(|_| ServeError::Parse)?, 16)
-            .map_err(|_| ServeError::Parse)?;
-        i += nl + 2;
-        if size == 0 {
-            if src.len() < i + 2 {
-                return Ok(None);
-            }
-            if &src[i..i + 2] != b"\r\n" {
-                // trailers refused
-                return Err(ServeError::Parse);
-            }
-            return Ok(Some((decoded, i + 2)));
-        }
-        if src.len() < i + size + 2 {
-            return Ok(None);
-        }
-        if &src[i + size..i + size + 2] != b"\r\n" {
-            return Err(ServeError::Parse);
-        }
-        decoded = decoded.saturating_add(size);
-        i += size + 2;
-    }
-}
+#[path = "parse/chunked.rs"]
+mod chunked;
+pub use chunked::{decode_chunked_into, measure_chunked};
 
-/// Copy decoded chunk bytes into `dst`. `src` is the wire body (after headers).
-pub fn decode_chunked_into(src: &[u8], dst: &mut Vec<u8>) -> Result<usize, ServeError> {
-    let mut i = 0usize;
-    loop {
-        let Some(nl) = src[i..].windows(2).position(|w| w == b"\r\n") else {
-            return Err(ServeError::Parse);
-        };
-        let line = &src[i..i + nl];
-        if line.contains(&b';') {
-            return Err(ServeError::Parse);
-        }
-        let size = usize::from_str_radix(std::str::from_utf8(line).map_err(|_| ServeError::Parse)?, 16)
-            .map_err(|_| ServeError::Parse)?;
-        i += nl + 2;
-        if size == 0 {
-            return Ok(i + 2);
-        }
-        if src.len() < i + size + 2 {
-            return Err(ServeError::Parse);
-        }
-        dst.extend_from_slice(&src[i..i + size]);
-        i += size + 2;
-    }
-}
-
+/// Compatibility entry point. Transports should supply a body limit too.
 pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, ServeError> {
+    parse_request_with_limits(buf, max_header, usize::MAX)
+}
+
+pub fn parse_request_with_limits(
+    buf: &[u8],
+    max_header: usize,
+    max_body: usize,
+) -> Result<ParseStatus<'_>, ServeError> {
     if scan_header_block(buf, max_header)?.is_none() {
         return Ok(ParseStatus::Partial);
     }
@@ -246,16 +199,23 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
     let mut chunked = false;
     let version = req.version.unwrap_or(0);
     let mut keepalive = version >= 1;
+    let mut close = false;
     let mut upgrade = false;
     let mut host_hdr: Option<&str> = None;
-    let mut pairs = Vec::with_capacity(req.headers.len());
     for h in req.headers.iter() {
         let val = std::str::from_utf8(h.value).map_err(|_| ServeError::Parse)?;
         if h.name.eq_ignore_ascii_case("content-length") {
             if saw_cl {
                 return Err(ServeError::Parse);
             }
-            content_length = val.trim().parse().map_err(|_| ServeError::Parse)?;
+            let digits = val.trim();
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ServeError::Parse);
+            }
+            content_length = digits.parse().map_err(|_| ServeError::Parse)?;
+            if content_length > max_body {
+                return Err(ServeError::BodyTooLarge);
+            }
             saw_cl = true;
         }
         if h.name.eq_ignore_ascii_case("transfer-encoding") {
@@ -267,7 +227,7 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
         }
         if h.name.eq_ignore_ascii_case("connection") {
             if connection_has(val, "close") {
-                keepalive = false;
+                close = true;
             }
             if connection_has(val, "keep-alive") {
                 keepalive = true;
@@ -283,9 +243,11 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
             if host_hdr.is_some() {
                 return Err(ServeError::Parse);
             }
+            if val.trim().is_empty() {
+                return Err(ServeError::Parse);
+            }
             host_hdr = Some(val);
         }
-        pairs.push((h.name, val));
     }
     if saw_cl && saw_te {
         return Err(ServeError::Parse);
@@ -297,21 +259,32 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
     }
     if let Some(uh) = uri_host {
         if let Some(hh) = host_hdr {
-            if !host_without_port(uh).eq_ignore_ascii_case(host_without_port(hh.trim())) {
+            if !uh.eq_ignore_ascii_case(host_without_port(hh.trim())) {
                 return Err(ServeError::Parse);
             }
         }
     }
-    let mut wire_end = n + content_length;
+    let mut wire_end = n.checked_add(content_length).ok_or(ServeError::Parse)?;
     if chunked {
-        match measure_chunked(&buf[n..])? {
+        match chunked::measure_chunked_limited(&buf[n..], max_body)? {
             None => return Ok(ParseStatus::Partial),
             Some((decoded, wire)) => {
                 content_length = decoded;
-                wire_end = n + wire;
+                wire_end = n.checked_add(wire).ok_or(ServeError::Parse)?;
             }
         }
     }
+    // A partial chunked body does not need an owned header vector yet.
+    let pairs = req
+        .headers
+        .iter()
+        .map(|header| {
+            Ok((
+                header.name,
+                std::str::from_utf8(header.value).map_err(|_| ServeError::Parse)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, ServeError>>()?;
     Ok(ParseStatus::Complete(Parsed {
         method,
         path,
@@ -321,7 +294,7 @@ pub fn parse_request(buf: &[u8], max_header: usize) -> Result<ParseStatus<'_>, S
         wire_end,
         content_length,
         chunked,
-        keepalive,
+        keepalive: keepalive && !close,
         upgrade,
     }))
 }
@@ -482,7 +455,9 @@ mod tests {
     fn abs_uri_path_is_origin() {
         let p = complete(b"GET http://evil/admin HTTP/1.1\r\nHost: evil\r\n\r\n");
         assert_eq!(p.path, "/admin");
-        let p = complete(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        let p = complete(
+            b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
         assert_eq!(p.path, "/");
         assert!(!p.keepalive);
     }
@@ -517,7 +492,9 @@ mod tests {
 
     #[test]
     fn upgrade_flag() {
-        let p = complete(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+        let p = complete(
+            b"GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+        );
         assert!(p.upgrade);
     }
 

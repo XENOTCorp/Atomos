@@ -1,5 +1,5 @@
 //! Serde default constructors for Config.
-use super::{MemoryMode, runtime_dir};
+use super::{runtime_dir, MemoryMode};
 use std::path::PathBuf;
 
 pub(crate) fn default_bind() -> String {

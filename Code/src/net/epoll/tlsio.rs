@@ -61,6 +61,7 @@ pub(crate) fn flush_tls(c: &mut Conn<'_>) -> io::Result<()> {
             Ok(0) => break,
             Ok(_) => c.last_rw = std::time::Instant::now(),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         }
     }
@@ -129,5 +130,14 @@ pub(crate) fn write_plain(c: &mut Conn<'_>, bytes: &[u8]) -> io::Result<usize> {
     }
     let n = tls.writer().write(bytes)?;
     flush_tls(c)?;
+    // rustls returns zero when its bounded record buffer is full. This is
+    // backpressure, not a closed socket: retain the plaintext/file range
+    // and retry after writable readiness drains encrypted records.
+    if n == 0 && !bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "epoll: tls buffer full",
+        ));
+    }
     Ok(n)
 }

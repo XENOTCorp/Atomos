@@ -333,9 +333,13 @@ impl Config {
         }
         if let Ok(v) = std::env::var("FDS_REACTOR_STRATEGY") {
             match v.trim().to_ascii_lowercase().as_str() {
-                "epoll" | "epoll-busy-poll" => self.reactor.strategy = ReactorStrategy::EpollBusyPoll,
+                "epoll" | "epoll-busy-poll" => {
+                    self.reactor.strategy = ReactorStrategy::EpollBusyPoll
+                }
                 "io-uring" | "iouring" => self.reactor.strategy = ReactorStrategy::IoUring,
-                other => eprintln!("fds: unknown FDS_REACTOR_STRATEGY {other:?} (epoll | io-uring)"),
+                other => {
+                    eprintln!("fds: unknown FDS_REACTOR_STRATEGY {other:?} (epoll | io-uring)")
+                }
             }
         }
         if let Some(v) = env_u32("FDS_REACTOR_IO_URING_ENTRIES") {
@@ -351,10 +355,7 @@ impl Config {
             self.af_xdp.queue = v;
         }
         if let Ok(v) = std::env::var("FDS_AF_XDP_QUEUES") {
-            self.af_xdp.queues = v
-                .split(',')
-                .filter_map(|s| s.trim().parse().ok())
-                .collect();
+            self.af_xdp.queues = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
         }
         if let Some(v) = env_flag("FDS_AF_XDP_ZERO_COPY") {
             self.af_xdp.zero_copy = v;

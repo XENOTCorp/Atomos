@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use atomos::config::Config;
-use atomos::io::{Out, InOwned};
+use atomos::io::{InOwned, Out};
 use atomos::json_out;
 use atomos::module::{AsyncModule, BoxFut, Handler};
 use atomos::rules::Ruleset;
@@ -30,7 +30,9 @@ impl AsyncModule for Echo {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let root = std::env::args().nth(1).unwrap_or_else(|| "examples/static".into());
+    let root = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "examples/static".into());
     let bind = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "127.0.0.1:8090".into());

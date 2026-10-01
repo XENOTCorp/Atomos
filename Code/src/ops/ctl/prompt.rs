@@ -1,8 +1,8 @@
 //! Interactive prompt and human output.
-use std::io::{BufRead, Write};
-use serde_json::Value;
-use super::{Cmd, Env, exec_cmd};
 use super::cmd::parse_line;
+use super::{exec_cmd, Cmd, Env};
+use serde_json::Value;
+use std::io::{BufRead, Write};
 
 pub fn help_text() -> String {
     "ATOMOS operator ctl

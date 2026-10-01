@@ -26,8 +26,8 @@ use atomos::flags::{FlagSet, FLAG_LOG};
 use atomos::io::{Body, In, Method, Out};
 use atomos::json_out;
 use atomos::module::{Handler, Module};
-use atomos::status::Status;
 use atomos::static_router;
+use atomos::status::Status;
 use serde_json::{json, Value};
 
 /// Demo credential table. A real deployment reads this from a file or a

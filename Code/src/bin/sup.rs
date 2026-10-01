@@ -15,7 +15,11 @@ fn main() {
     let exe = std::env::args()
         .nth(2)
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_exe().expect("exe").with_file_name("atomos"));
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .expect("exe")
+                .with_file_name("atomos")
+        });
     let rest: Vec<String> = std::env::args().skip(3).collect();
     if let Err(e) = sup::run(WorkerSpec {
         exe,

@@ -2,9 +2,12 @@
 //!
 //! Files ≥ [`SF_MIN`] bytes are served as [`OutBody::File`]: the H1
 //! epoll path sends them with `sendfile` (no userspace copy), and the
-//! tokio paths materialize them into memory. A bounded LRU of open fds
+//! Tokio paths read bounded chunks. A bounded LRU of open fds
 //! is kept here (the open_file_cache equivalent) so repeated hits never
 //! re-open/re-stat: the response cache never stores File bodies.
+
+#[path = "static_files/open.rs"]
+mod open;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -51,6 +54,9 @@ const FD_CACHE_MAX: usize = 64;
 struct FdEntry {
     file: Arc<std::fs::File>,
     len: u64,
+    content_type: &'static str,
+    ttl_ms: u32,
+    at: std::time::Instant,
     /// Recency stamp for LRU eviction (monotonic counter).
     last: u64,
 }
@@ -80,6 +86,7 @@ impl FdCache {
 
 pub struct StaticMod {
     root: PathBuf,
+    directory: Option<std::fs::File>,
     errors: ErrorPage,
     pub hits: LineAtomicU64,
     fd: Mutex<FdCache>,
@@ -87,8 +94,10 @@ pub struct StaticMod {
 
 impl StaticMod {
     pub fn new(root: PathBuf, errors: ErrorPage) -> Arc<Self> {
+        let directory = open::root(&root).ok();
         Arc::new(Self {
             root,
+            directory,
             errors,
             hits: LineAtomicU64::new(0),
             fd: Mutex::new(FdCache {
@@ -96,6 +105,16 @@ impl StaticMod {
                 seq: 0,
             }),
         })
+    }
+
+    fn open_file(&self, path: &Path) -> std::io::Result<std::fs::File> {
+        let root = self.directory.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "static root unavailable")
+        })?;
+        let relative = path.strip_prefix(&self.root).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "static path outside root")
+        })?;
+        open::beneath(root, relative)
     }
 
     fn not_found(&self) -> Out {
@@ -130,32 +149,38 @@ impl Module for StaticMod {
             Some(p) => p,
             None => return Ok(self.not_found()),
         };
-        let ct = mime::from_path(dest.to_str().unwrap_or(rel));
-        let ttl = if ct.starts_with("text/html") {
-            5_000
-        } else {
-            60_000
-        };
         // Large-file hit path: the fd LRU serves the body with no
         // stat/open syscalls at all (the byte path's response-cache
         // equivalent for the sendfile path).
         let mut fd = self.fd.lock();
         let stamp = fd.seq.wrapping_add(1);
         fd.seq = stamp;
-        if let Some(e) = fd.map.get_mut(&dest) {
+        if let Some(e) = fd.map.get_mut(&dest).filter(|entry| {
+            entry.at.elapsed() < std::time::Duration::from_millis(u64::from(entry.ttl_ms))
+        }) {
             e.last = stamp;
             let file = e.file.clone();
-            let len = e.len;
+            let (len, ct, ttl) = (e.len, e.content_type, e.ttl_ms);
             drop(fd);
             return Ok(ranged_file(req, ct, ttl, file, len));
         }
         drop(fd);
-        // Miss path: extension fallback + one metadata call, then either
-        // the sendfile fd (inserted into the LRU) or the byte read.
-        let dest = if !dest.exists() && dest.extension().is_none() {
-            dest.with_extension("html")
-        } else {
-            dest
+        // Open beneath the root first, then inspect that exact descriptor.
+        // No exists/stat/open race, no symlink escape, and no disk I/O while
+        // holding the cache mutex shared by workers.
+        let cache_key = dest.clone();
+        let (dest, file) = match self.open_file(&dest) {
+            Ok(file) => (dest, file),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && dest.extension().is_none() =>
+            {
+                let fallback = dest.with_extension("html");
+                match self.open_file(&fallback) {
+                    Ok(file) => (fallback, file),
+                    Err(_) => return Ok(self.not_found()),
+                }
+            }
+            Err(_) => return Ok(self.not_found()),
         };
         let ct = mime::from_path(dest.to_str().unwrap_or(rel));
         let ttl = if ct.starts_with("text/html") {
@@ -163,34 +188,38 @@ impl Module for StaticMod {
         } else {
             60_000
         };
-        let meta = match std::fs::metadata(&dest) {
-            Ok(m) if m.is_file() => m,
+        let meta = match file.metadata() {
+            Ok(meta) if meta.is_file() => meta,
             _ => return Ok(self.not_found()),
         };
         let len = meta.len();
+        let file = Arc::new(file);
         if len >= sf_min() {
             let mut fd = self.fd.lock();
-            let f = match std::fs::File::open(&dest) {
-                Ok(f) => f,
-                Err(_) => return Ok(self.not_found()),
-            };
             let last = fd.bump();
             fd.map.insert(
-                dest.clone(),
+                cache_key,
                 FdEntry {
-                    file: Arc::new(f),
+                    file: file.clone(),
                     len,
                     last,
+                    content_type: ct,
+                    ttl_ms: ttl,
+                    at: std::time::Instant::now(),
                 },
             );
             fd.evict_if_over();
-            let e = fd.map.get(&dest).expect("just inserted");
-            let file = e.file.clone();
             drop(fd);
             return Ok(ranged_file(req, ct, ttl, file, len));
         }
-        match std::fs::read(&dest) {
-            Ok(b) => Ok(ranged_bytes(req, ct, ttl, Bytes::from(b))),
+        match (FileBody {
+            file,
+            offset: 0,
+            len,
+        })
+        .read_to_bytes()
+        {
+            Ok(bytes) => Ok(ranged_bytes(req, ct, ttl, bytes)),
             Err(_) => Ok(self.not_found()),
         }
     }
@@ -372,7 +401,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<LineAtomicU64>(), 64);
         let a = m.handle(&mk("/")).unwrap();
         assert_eq!(a.status.as_u16(), 200);
-        assert!(std::str::from_utf8(a.body.as_bytes()).unwrap().contains("<h1>ok"));
+        assert!(std::str::from_utf8(a.body.as_bytes())
+            .unwrap()
+            .contains("<h1>ok"));
         let b = m.handle(&mk("/x.txt")).unwrap();
         assert_eq!(b.status.as_u16(), 200);
         assert_eq!(b.body.as_bytes(), b"hello");

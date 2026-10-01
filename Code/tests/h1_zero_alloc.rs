@@ -16,11 +16,11 @@ use std::cell::Cell;
 
 use bytes::Bytes;
 
-use atomos::cache::ResponseCache;
+use atomos::cache::{CachedResponse, ResponseCache};
 use atomos::encode::encode_response;
 use atomos::epoll::{append_in_cap, buf_capacity_for, copy_into_out, OUT_CAP};
 use atomos::flags::FlagSet;
-use atomos::io::{CacheDirective, Method, Out, OutBody};
+use atomos::io::{Body, CacheDirective, HeaderView, In, Method, Out, OutBody};
 use atomos::status::Status;
 
 thread_local! {
@@ -105,6 +105,17 @@ fn h1_hot_path_allocates_zero_after_warmup() {
     let cap_scratch = scratch.capacity();
     let cap_queued = queued.capacity();
 
+    let request = In {
+        method: Method::Get,
+        path: "/health",
+        query: "",
+        headers: HeaderView {
+            pairs: vec![("Host", "localhost")],
+        },
+        body: Body::Empty,
+        peer: "127.0.0.1:1".parse().unwrap(),
+        flags: FlagSet::empty(),
+    };
     reset();
     for _ in 0..10_000 {
         encode_response(&out, &mut scratch);
@@ -116,6 +127,11 @@ fn h1_hot_path_allocates_zero_after_warmup() {
             .get_wire(Method::Get, "/health", "")
             .expect("wire hit");
         assert_eq!(wire.as_ref().as_ref(), scratch.as_slice());
+        let CachedResponse::Wire { bytes, .. } = cache.get_h1(&request).expect("policy-aware hit")
+        else {
+            panic!("wire expected")
+        };
+        assert_eq!(bytes.as_ref().as_ref(), scratch.as_slice());
     }
 
     assert_eq!(

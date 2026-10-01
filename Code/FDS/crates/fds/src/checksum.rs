@@ -114,7 +114,11 @@ mod tests {
         let c = ip_checksum(&hdr);
         // One's-complement sum including the checksum field folds to 0.
         let sum = sum_u16(&hdr).wrapping_add(c as u32);
-        assert_eq!(checksum_finalize(sum), 0, "checksum of header+csum folds to 0");
+        assert_eq!(
+            checksum_finalize(sum),
+            0,
+            "checksum of header+csum folds to 0"
+        );
         assert_eq!(c, 0xf95d); // hand-computed RFC-style value
     }
 
@@ -129,7 +133,7 @@ mod tests {
         udp[0..2].copy_from_slice(&1234u16.to_be_bytes()); // sport
         udp[2..4].copy_from_slice(&5678u16.to_be_bytes()); // dport
         udp[4..6].copy_from_slice(&13u16.to_be_bytes()); // length
-        // udp[6..8] stays zeroed: checksum field.
+                                                         // udp[6..8] stays zeroed: checksum field.
         udp[8..].copy_from_slice(b"hello");
         let c = udp_checksum(src, dst, 13, &udp);
         // Fold: pseudo-header parts + whole datagram incl. checksum == 0.

@@ -273,11 +273,7 @@ impl TcpStack {
         if ip_end > frame.len() || ip_end < tcp_off {
             return;
         }
-        self.ingest_tcp(
-            HostAddr::V4(ip.src),
-            &frame[6..12],
-            &frame[tcp_off..ip_end],
-        );
+        self.ingest_tcp(HostAddr::V4(ip.src), &frame[6..12], &frame[tcp_off..ip_end]);
     }
 
     fn ingest_v6(&mut self, frame: &[u8]) {
@@ -297,11 +293,7 @@ impl TcpStack {
         if ip_end > frame.len() || ip_end < tcp_off + TCP_LEN {
             return;
         }
-        self.ingest_tcp(
-            HostAddr::V6(ip.src),
-            &frame[6..12],
-            &frame[tcp_off..ip_end],
-        );
+        self.ingest_tcp(HostAddr::V6(ip.src), &frame[6..12], &frame[tcp_off..ip_end]);
     }
 
     fn ingest_tcp(&mut self, src: HostAddr, src_mac: &[u8], seg: &[u8]) {
@@ -380,11 +372,8 @@ impl TcpStack {
             return;
         }
         self.on_ack(hdr.ack, &sacks);
-        let in_order = !payload.is_empty()
-            && self
-                .pcb
-                .as_ref()
-                .is_some_and(|p| hdr.seq == p.rcv_nxt);
+        let in_order =
+            !payload.is_empty() && self.pcb.as_ref().is_some_and(|p| hdr.seq == p.rcv_nxt);
         if in_order {
             {
                 let pcb = self.pcb.as_mut().unwrap();
@@ -572,7 +561,16 @@ impl TcpStack {
         ack: u32,
         payload: &[u8],
     ) -> Vec<u8> {
-        self.build_segment(dst_mac, dst, dst_port, seq, ack, TH_ACK | TH_PSH, &[], payload)
+        self.build_segment(
+            dst_mac,
+            dst,
+            dst_port,
+            seq,
+            ack,
+            TH_ACK | TH_PSH,
+            &[],
+            payload,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -851,7 +849,10 @@ mod tests {
             nframes += 1;
             srv.ingest(&f);
         }
-        assert!(nframes >= 3, "TSO must emit several MSS segments, got {nframes}");
+        assert!(
+            nframes >= 3,
+            "TSO must emit several MSS segments, got {nframes}"
+        );
         pump(&mut srv, &mut cli, |_| false);
         let mut buf = vec![0u8; 4096];
         let n = srv.read(&mut buf);

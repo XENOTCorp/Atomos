@@ -1,12 +1,12 @@
 //! Accept loop for the tokio engine.
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
-use tokio::net::TcpListener;
+use super::detect::handle_tcp;
 use crate::atom::AtomCtx;
 use crate::route::Router;
 use crate::tls::TlsHold;
-use super::detect::handle_tcp;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpListener;
 
 pub(crate) async fn accept_loop(
     listener: TcpListener,

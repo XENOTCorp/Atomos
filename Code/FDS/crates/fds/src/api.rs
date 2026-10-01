@@ -122,18 +122,13 @@ impl Driver for EpollDriver {
         self.events.clear();
         let mut evbuf = vec![crate::reactor::EpollEvent::default(); n.max(1)];
         let m = self.reactor.copy_events(n, &mut evbuf);
-        self.events.extend(
-            evbuf
-                .iter()
-                .take(m)
-                .map(|e| Event {
-                    token: e.token,
-                    readable: e.readable,
-                    writable: e.writable,
-                    hang_up: e.hang_up,
-                    error: e.error,
-                }),
-        );
+        self.events.extend(evbuf.iter().take(m).map(|e| Event {
+            token: e.token,
+            readable: e.readable,
+            writable: e.writable,
+            hang_up: e.hang_up,
+            error: e.error,
+        }));
         Ok(m)
     }
     fn events(&self) -> &[Event] {
@@ -184,9 +179,13 @@ impl IoUringDriver {
 impl Driver for IoUringDriver {
     fn register(&mut self, fd: i32, token: u64, interest: Interest) -> io::Result<()> {
         if self.registrations.contains_key(&token) {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "token registered"));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "token registered",
+            ));
         }
-        self.reactor.submit_poll(fd, Self::poll_flags(interest), token)?;
+        self.reactor
+            .submit_poll(fd, Self::poll_flags(interest), token)?;
         self.registrations.insert(token, (fd, interest, 1));
         Ok(())
     }
@@ -198,8 +197,10 @@ impl Driver for IoUringDriver {
         // Cancel the old poll and arm a new one with the new interest.
         // The cancel completion (skipped below) balances the count.
         let _ = self.reactor.ring_cancel(token);
-        self.reactor.submit_poll(fd, Self::poll_flags(interest), token)?;
-        self.registrations.insert(token, (fd, interest, in_flight + 1));
+        self.reactor
+            .submit_poll(fd, Self::poll_flags(interest), token)?;
+        self.registrations
+            .insert(token, (fd, interest, in_flight + 1));
         Ok(())
     }
 
@@ -226,31 +227,30 @@ impl Driver for IoUringDriver {
         }
         self.events.clear();
         let mut completions: Vec<(u64, io::Result<u32>)> = Vec::with_capacity(64);
-        self.reactor
-            .drain(|ud, res| completions.push((ud, res)));
+        self.reactor.drain(|ud, res| completions.push((ud, res)));
         for (token, res) in completions {
             let Some(&(fd, interest, in_flight)) = self.registrations.get(&token) else {
                 continue; // unregistered while in flight
             };
-            let cancelled = res
-                .as_ref()
-                .err()
-                .and_then(|e| e.raw_os_error())
-                == Some(libc::ECANCELED);
+            let cancelled =
+                res.as_ref().err().and_then(|e| e.raw_os_error()) == Some(libc::ECANCELED);
             let in_flight = in_flight.saturating_sub(1);
             if !cancelled {
                 let ok = res.is_ok();
                 self.events.push(Event {
                     token,
-                    readable: ok && matches!(interest, Interest::Readable | Interest::ReadableWritable),
-                    writable: ok && matches!(interest, Interest::Writable | Interest::ReadableWritable),
+                    readable: ok
+                        && matches!(interest, Interest::Readable | Interest::ReadableWritable),
+                    writable: ok
+                        && matches!(interest, Interest::Writable | Interest::ReadableWritable),
                     hang_up: !ok,
                     error: !ok,
                 });
             }
             if in_flight == 0 {
                 // The last completion for this token: re-arm the poll.
-                self.reactor.submit_poll(fd, Self::poll_flags(interest), token)?;
+                self.reactor
+                    .submit_poll(fd, Self::poll_flags(interest), token)?;
                 self.registrations.insert(token, (fd, interest, 1));
             } else {
                 self.registrations.insert(token, (fd, interest, in_flight));
@@ -388,10 +388,7 @@ impl TcpListener {
 
 impl AsyncAccept for TcpListener {
     type Stream = TcpStream;
-    fn poll_accept(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<io::Result<Option<Self::Stream>>> {
+    fn poll_accept(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<Option<Self::Stream>>> {
         match self.inner.accept() {
             Ok(Some((stream, _peer))) => Poll::Ready(Ok(Some(TcpStream::new(stream)))),
             Ok(None) => Poll::Ready(Ok(None)),
@@ -534,7 +531,9 @@ mod tests {
         let mut driver = EpollDriver::new(64).unwrap();
         let mut server = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let saddr = server.local_addr().unwrap();
-        driver.register(server.as_raw_fd(), 7, Interest::Readable).unwrap();
+        driver
+            .register(server.as_raw_fd(), 7, Interest::Readable)
+            .unwrap();
 
         let mut ctx = noop_context();
         let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -557,7 +556,9 @@ mod tests {
         }
         assert_eq!(got, b"api udp echo".len());
         let mut rbuf = [0u8; 64];
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let n = client.recv(&mut rbuf).unwrap();
         assert_eq!(&rbuf[..n], b"api udp echo");
     }

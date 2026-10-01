@@ -1,8 +1,8 @@
 //! Landlock filesystem restrict after bind.
-use std::ffi::CString;
-use std::path::Path;
 use crate::config::Config;
 use crate::error::ServeError;
+use std::ffi::CString;
+use std::path::Path;
 
 pub(crate) const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
 #[cfg(target_os = "linux")]
@@ -52,7 +52,11 @@ pub(crate) fn path_parent_for_rule(path: &Path) -> Option<&Path> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn landlock_add_path(ruleset_fd: libc::c_int, path: &Path, allowed: u64) -> Result<(), ServeError> {
+pub(crate) fn landlock_add_path(
+    ruleset_fd: libc::c_int,
+    path: &Path,
+    allowed: u64,
+) -> Result<(), ServeError> {
     if !path.exists() {
         tracing::warn!(path = %path.display(), "landlock: path missing, skip rule");
         return Ok(());
@@ -125,6 +129,12 @@ pub(crate) fn landlock_restrict(cfg: &Config) -> Result<(), ServeError> {
 
     let result = (|| {
         landlock_add_path(ruleset_fd, &cfg.static_root, read_only)?;
+        // Keep resource accounting and topology discovery functional after
+        // sandboxing; otherwise RSS failures silently report zero usage.
+        for path in ["/proc/self/status", "/proc/self/stat", "/proc/cpuinfo"] {
+            landlock_add_path(ruleset_fd, Path::new(path), LANDLOCK_ACCESS_FS_READ_FILE)?;
+        }
+        landlock_add_path(ruleset_fd, Path::new("/sys/devices/system/cpu"), read_only)?;
         if let Some(p) = path_parent_for_rule(&cfg.rules_path) {
             landlock_add_path(ruleset_fd, p, read_write)?;
         }

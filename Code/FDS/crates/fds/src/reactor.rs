@@ -121,7 +121,10 @@ impl Reactor {
     /// Pairs with [`Reactor::delivered`]; unlike [`Reactor::poll_busy`],
     /// it never drains multiple batches, so the delivered set is complete.
     pub fn poll_once(&mut self) -> std::io::Result<usize> {
-        let zero = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let zero = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let n = epoll::wait(&self.ep, &mut self.events, Some(&zero))?;
         Ok(n)
     }
@@ -129,7 +132,10 @@ impl Reactor {
     /// Busy-poll: drain the ready list with timeout 0 until empty, then
     /// return the total number of events delivered.
     pub fn poll_busy(&mut self) -> std::io::Result<usize> {
-        let zero = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let zero = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let mut total = 0;
         loop {
             let n = epoll::wait(&self.ep, &mut self.events, Some(&zero))?;
@@ -214,14 +220,24 @@ mod tests {
         write(&b, b"x").unwrap();
 
         // Edge fires once.
-        let n = r.poll_timeout(Some(&Timespec { tv_sec: 0, tv_nsec: 0 })).unwrap();
+        let n = r
+            .poll_timeout(Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }))
+            .unwrap();
         assert_eq!(n, 1);
         let ev = r.delivered(n).next().unwrap();
         assert!(ev.readable);
         assert_eq!(ev.token, 7);
 
         // Without draining, the edge does NOT re-fire (ET semantics).
-        let n2 = r.poll_timeout(Some(&Timespec { tv_sec: 0, tv_nsec: 0 })).unwrap();
+        let n2 = r
+            .poll_timeout(Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }))
+            .unwrap();
         assert_eq!(n2, 0, "edge-triggered: no new edge until drained");
 
         // Draining to EAGAIN re-arms the edge: a second write fires again.
@@ -230,7 +246,12 @@ mod tests {
         assert_eq!(got, 1);
         assert_eq!(buf[0], b'x');
         write(&b, b"y").unwrap();
-        let n3 = r.poll_timeout(Some(&Timespec { tv_sec: 0, tv_nsec: 0 })).unwrap();
+        let n3 = r
+            .poll_timeout(Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }))
+            .unwrap();
         assert_eq!(n3, 1);
         let mut buf2 = [0u8; 8];
         read(&a, &mut buf2).unwrap();
@@ -247,7 +268,12 @@ mod tests {
         // Drain the fd; subsequent busy polls find nothing.
         let mut buf = [0u8; 8];
         read(&a, &mut buf).unwrap();
-        let n = r.poll_timeout(Some(&Timespec { tv_sec: 0, tv_nsec: 0 })).unwrap();
+        let n = r
+            .poll_timeout(Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }))
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -258,7 +284,12 @@ mod tests {
         r.register(a.as_raw_fd(), 5, Interest::Readable).unwrap();
         r.unregister(a.as_raw_fd()).unwrap();
         write(&b, b"z").unwrap();
-        let n = r.poll_timeout(Some(&Timespec { tv_sec: 0, tv_nsec: 0 })).unwrap();
+        let n = r
+            .poll_timeout(Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }))
+            .unwrap();
         assert_eq!(n, 0);
     }
 }

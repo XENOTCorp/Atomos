@@ -110,13 +110,18 @@ impl<const CAP: usize> ConnTable<CAP> {
     /// [`ConnTable::initialize`]) before sharing it.
     pub fn new() -> Self {
         ConnTable {
-            pool: Pool::new(),
+            pool: Pool::from_fn(|_| {
+                Connection::new(
+                    std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+                    0,
+                )
+            }),
             flags: std::array::from_fn(|_| std::sync::atomic::AtomicU8::new(0)),
         }
     }
 
     /// Initialize slot `i` (call once per slot before sharing).
-    pub fn initialize(&self, i: usize, conn: Connection) {
+    pub fn initialize(&mut self, i: usize, conn: Connection) {
         self.pool.initialize(i, conn);
     }
 
@@ -142,14 +147,22 @@ impl<const CAP: usize> ConnTable<CAP> {
     /// Release a slot back to the free list (the caller must own it,
     /// e.g. after closing a connection). The slot's data stays in place
     /// for the next owner.
-    pub fn release_slot(&self, slot: usize) {
-        self.pool.release_index(slot);
+    /// # Safety
+    /// Caller must own the allocated slot and end all borrows/kernel access
+    /// before releasing it exactly once. Never release a guarded slot manually.
+    pub unsafe fn release_slot(&self, slot: usize) {
+        unsafe {
+            self.pool.release_index(slot);
+        }
     }
 
     /// Mutable access to an owned slot's connection (the caller must own
     /// the slot; e.g. the reactor holds it for a live connection).
-    pub fn conn_mut(&self, slot: usize) -> &mut Connection {
-        self.pool.get_mut(slot)
+    /// # Safety
+    /// Caller must own the allocated slot exclusively for the whole borrow.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn conn_mut(&self, slot: usize) -> &mut Connection {
+        unsafe { self.pool.get_mut(slot) }
     }
 
     /// Capacity.
@@ -226,7 +239,7 @@ mod tests {
 
     #[test]
     fn table_acquire_release_cycle() {
-        let table: ConnTable<4> = ConnTable::new();
+        let mut table: ConnTable<4> = ConnTable::new();
         for i in 0..4 {
             table.initialize(i, Connection::new("127.0.0.1:0".parse().unwrap(), 1));
         }

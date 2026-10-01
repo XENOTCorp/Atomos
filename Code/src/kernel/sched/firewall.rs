@@ -37,4 +37,3 @@ impl Sched {
         bnn.predict(&f)
     }
 }
-

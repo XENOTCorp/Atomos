@@ -39,7 +39,7 @@ async fn epoll_keepalive_many_requests_and_cache_hit() {
         br#"{"rules":[{"id":"s","module":"static","methods":["GET","HEAD"],"include":["/*"],"exclude":[]}]}"#,
     )
     .unwrap();
-    let (router, ctx, _) = static_router(cfg, rules);
+    let (router, ctx, static_module) = static_router(cfg, rules);
     let metrics = router.metrics.clone();
     tokio::spawn(async move {
         let _ = engine::run(EngineKind::Epoll, router, ctx).await;
@@ -74,17 +74,14 @@ async fn epoll_keepalive_many_requests_and_cache_hit() {
         assert!(text.starts_with("HTTP/1.1 200"), "{text}");
         assert!(text.contains("KEEPALIVE-BODY"), "{text}");
     }
-    // The second GET of a Globally-cached static resource is a
-    // WIRE-cache hit: it never re-enters Router::dispatch, so the
-    // request counter must still be 1 after two GETs.
-    assert_eq!(
-        metrics.requests.v.load(Ordering::Relaxed),
-        1,
-        "second GET must be served from the wire cache"
-    );
+    // A hit skips the static module, but still counts as a real request
+    // and passes through admission/resource policy.
+    assert_eq!(static_module.hits.v.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.requests.v.load(Ordering::Relaxed), 2);
+    assert_eq!(metrics.hits.v.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.misses.v.load(Ordering::Relaxed), 1);
 
-    // Same connection: a missing path must still produce a 404 page : 
-    // and that request DOES go through dispatch (counter -> 2).
+    // Same connection: a missing path still produces a 404.
     write!(s, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
     let mut resp = Vec::new();
     let mut saw404 = false;
@@ -98,5 +95,5 @@ async fn epoll_keepalive_many_requests_and_cache_hit() {
             && resp.windows(4).any(|w| w == b"\r\n\r\n");
     }
     assert!(String::from_utf8_lossy(&resp).contains("404"));
-    assert_eq!(metrics.requests.v.load(Ordering::Relaxed), 2);
+    assert_eq!(metrics.requests.v.load(Ordering::Relaxed), 3);
 }

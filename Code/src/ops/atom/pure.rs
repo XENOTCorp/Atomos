@@ -1,11 +1,11 @@
 //! Pure atoms. No world write.
-use std::sync::atomic::Ordering;
-use serde_json::{json, Value};
 use super::AtomCtx;
 use crate::align::{STATE_ON, STATE_RESTARTING};
 use crate::error::AtomError;
 use crate::governor::Governor;
 use crate::rules::{RuleError, Ruleset};
+use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 
 pub(crate) fn signal_get(ctx: &AtomCtx) -> Result<Value, AtomError> {
     let s = ctx.signal.v.load(Ordering::Acquire);

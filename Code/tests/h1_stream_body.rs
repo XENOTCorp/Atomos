@@ -92,5 +92,8 @@ async fn chunked_then_reuse() {
     let mut rest = Vec::new();
     let _ = s.read_to_end(&mut rest);
     let t2 = String::from_utf8_lossy(&rest);
-    assert!(t2.contains("HTTP/1.1 200") || text.contains("HTTP/1.1 200"), "{t2}");
+    assert!(
+        t2.contains("HTTP/1.1 200") || text.contains("HTTP/1.1 200"),
+        "{t2}"
+    );
 }

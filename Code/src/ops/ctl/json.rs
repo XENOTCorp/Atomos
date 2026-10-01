@@ -1,10 +1,10 @@
 //! JSON line operator API.
+use super::cmd::{parse_json, parse_line};
+use super::{exec_cmd, Cmd, Env};
+use crate::error::AtomError;
+use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
-use serde_json::{json, Value};
-use crate::error::AtomError;
-use super::{Cmd, Env, exec_cmd};
-use super::cmd::{parse_json, parse_line};
 
 pub fn io_error_json(err: &std::io::Error, path: &Path) -> Value {
     let path_s = path.display().to_string();

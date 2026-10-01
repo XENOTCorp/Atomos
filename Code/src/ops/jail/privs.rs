@@ -1,8 +1,8 @@
 //! Drop root, capabilities, and peer credential check.
-use std::ffi::CString;
-use std::os::fd::RawFd;
 use crate::config::Config;
 use crate::error::ServeError;
+use std::ffi::CString;
+use std::os::fd::RawFd;
 
 pub(crate) fn drop_privs(cfg: &Config) -> Result<(), ServeError> {
     let uid = unsafe { libc::geteuid() };
@@ -82,4 +82,3 @@ pub fn peer_euid_ok(fd: RawFd) -> bool {
         true
     }
 }
-

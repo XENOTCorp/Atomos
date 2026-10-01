@@ -168,7 +168,8 @@ fn addr_from_storage(ss: &libc::sockaddr_storage) -> SocketAddr {
     match ss.ss_family as libc::c_int {
         libc::AF_INET => {
             // SAFETY: AF_INET guarantees the kernel wrote a `sockaddr_in`.
-            let sin = unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let sin =
+                unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
             SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)),
                 u16::from_be(sin.sin_port),
@@ -335,7 +336,10 @@ impl UdpSocket {
             hdrs[i].msg_hdr.msg_controllen = 0;
             hdrs[i].msg_hdr.msg_flags = 0;
             hdrs[i].msg_len = 0;
-            iovs[i].iov_base = bufs[i].as_mut_full_slice().as_mut_ptr().cast::<libc::c_void>();
+            iovs[i].iov_base = bufs[i]
+                .as_mut_full_slice()
+                .as_mut_ptr()
+                .cast::<libc::c_void>();
             iovs[i].iov_len = bufs[i].capacity();
         }
         // SAFETY: `hdrs` points at `n` initialized `mmsghdr` entries with
@@ -468,9 +472,7 @@ impl UdpSocket {
         // before `sendmsg` returns for non-zerocopy; for zerocopy the
         // caller must keep `data` alive until the completion queue
         // reports; documented at the call site).
-        let ret = unsafe {
-            libc::sendmsg(self.fd.as_raw_fd(), &hdr, MSG_ZEROCOPY)
-        };
+        let ret = unsafe { libc::sendmsg(self.fd.as_raw_fd(), &hdr, MSG_ZEROCOPY) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             return if err.raw_os_error() == Some(libc::EAGAIN) {
@@ -566,9 +568,8 @@ impl UdpSocket {
         }
         // SAFETY: `hdrs` points at `n` initialized `mmsghdr` entries with
         // matching iovecs and sockaddrs, all valid for the call duration.
-        let ret = unsafe {
-            libc::sendmmsg(self.fd.as_raw_fd(), hdrs.as_mut_ptr(), n as libc::c_uint, 0)
-        };
+        let ret =
+            unsafe { libc::sendmmsg(self.fd.as_raw_fd(), hdrs.as_mut_ptr(), n as libc::c_uint, 0) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             return if err.raw_os_error() == Some(libc::EAGAIN) {
@@ -678,6 +679,33 @@ mod tests {
         }
     }
 
+    /// Loopback delivery can be deferred to a softirq under load. A
+    /// nonblocking receive is allowed to return zero or a partial batch.
+    fn recv_expected<const N: usize>(
+        socket: &UdpSocket,
+        bufs: &mut [mol::Buffer<N>],
+        out: &mut [RecvResult],
+        expected: usize,
+    ) -> usize {
+        assert!(expected <= bufs.len().min(out.len()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut received = 0;
+        while received < expected {
+            let n = socket
+                .recv_batch(&mut bufs[received..expected], &mut out[received..expected])
+                .unwrap();
+            received += n;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "received {received}/{expected} datagrams"
+            );
+            if n == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        received
+    }
+
     #[test]
     fn udp_loopback_roundtrip() {
         let a = bind();
@@ -688,7 +716,7 @@ mod tests {
 
         let mut bufs: [mol::Buffer<2048>; 1] = std::array::from_fn(|_| mol::Buffer::new());
         let mut out: [RecvResult; 1] = std::array::from_fn(|_| recv_slot());
-        let n = b.recv_batch(&mut bufs, &mut out).unwrap();
+        let n = recv_expected(&b, &mut bufs, &mut out, 1);
         assert_eq!(n, 1);
         assert_eq!(bufs[0].as_slice(), payload);
         assert_eq!(out[0].len, payload.len());
@@ -723,9 +751,7 @@ mod tests {
             assert_eq!(got, payload.len());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let notifs = sock
-            .drain_zerocopy_notifications()
-            .expect("udp drain");
+        let notifs = sock.drain_zerocopy_notifications().expect("udp drain");
         eprintln!("udp: notifications after 3 zc sends = {notifs}");
 
         // Mutation probe: send with ZC, mutate the buffer before the
@@ -796,12 +822,13 @@ mod tests {
         let b = bind();
         let baddr = b.local_addr().unwrap();
         let payloads: Vec<Vec<u8>> = (0..8).map(|i| format!("all-{i}").into_bytes()).collect();
-        let msgs: Vec<(&[u8], SocketAddr)> = payloads.iter().map(|p| (p.as_slice(), baddr)).collect();
+        let msgs: Vec<(&[u8], SocketAddr)> =
+            payloads.iter().map(|p| (p.as_slice(), baddr)).collect();
         assert_eq!(a.send_batch_all(&msgs).unwrap(), payloads.len());
 
         let mut bufs: [mol::Buffer<2048>; 16] = std::array::from_fn(|_| mol::Buffer::new());
         let mut out: [RecvResult; 16] = std::array::from_fn(|_| recv_slot());
-        let n = b.recv_batch(&mut bufs, &mut out).unwrap();
+        let n = recv_expected(&b, &mut bufs, &mut out, payloads.len());
         assert_eq!(n, payloads.len());
         for (i, p) in payloads.iter().enumerate() {
             assert_eq!(bufs[i].as_slice(), p.as_slice());
@@ -813,14 +840,16 @@ mod tests {
         let a = bind();
         let b = bind();
         let baddr = b.local_addr().unwrap();
-        let payloads: Vec<Vec<u8>> = (0..10).map(|i| format!("datagram-{i}").into_bytes()).collect();
+        let payloads: Vec<Vec<u8>> = (0..10)
+            .map(|i| format!("datagram-{i}").into_bytes())
+            .collect();
         for p in &payloads {
             a.send_to(p, baddr).unwrap();
         }
 
         let mut bufs: [mol::Buffer<2048>; 16] = std::array::from_fn(|_| mol::Buffer::new());
         let mut out: [RecvResult; 16] = std::array::from_fn(|_| recv_slot());
-        let n = b.recv_batch(&mut bufs, &mut out).unwrap();
+        let n = recv_expected(&b, &mut bufs, &mut out, payloads.len());
         assert_eq!(n, payloads.len());
         for (i, p) in payloads.iter().enumerate() {
             assert_eq!(bufs[i].as_slice(), p.as_slice());
@@ -850,7 +879,7 @@ mod tests {
 
         let mut bufs: [mol::Buffer<2048>; 1] = std::array::from_fn(|_| mol::Buffer::new());
         let mut out: [RecvResult; 1] = std::array::from_fn(|_| recv_slot());
-        let n = b.recv_batch(&mut bufs, &mut out).unwrap();
+        let n = recv_expected(&b, &mut bufs, &mut out, 1);
         assert_eq!(n, 1);
         assert!(out[0].truncated);
         assert_eq!(out[0].len, 2048);
@@ -879,7 +908,12 @@ mod tests {
         let dst = s.local_addr().unwrap();
         match s.send_to(&payload, dst) {
             Ok(sent) => assert_eq!(sent, payload.len()),
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP) | Some(libc::ENOPROTOOPT)) => {
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EOPNOTSUPP) | Some(libc::ENOPROTOOPT)
+                ) =>
+            {
                 eprintln!("skipping udp_gso_gro_flags: send unsupported: {e}");
             }
             Err(e) => panic!("GSO send failed: {e}"),
@@ -903,7 +937,7 @@ mod tests {
         assert_eq!(a.send_to(payload, baddr).unwrap(), payload.len());
         let mut bufs: [mol::Buffer<2048>; 1] = std::array::from_fn(|_| mol::Buffer::new());
         let mut out: [RecvResult; 1] = std::array::from_fn(|_| recv_slot());
-        let n = b.recv_batch(&mut bufs, &mut out).unwrap();
+        let n = recv_expected(&b, &mut bufs, &mut out, 1);
         assert_eq!(n, 1);
         assert_eq!(bufs[0].as_slice(), payload);
         assert!(out[0].src.is_ipv6());
@@ -928,7 +962,7 @@ mod tests {
         client.send_to(b"dual", dst).unwrap();
         let mut bufs: [mol::Buffer<2048>; 1] = std::array::from_fn(|_| mol::Buffer::new());
         let mut out: [RecvResult; 1] = std::array::from_fn(|_| recv_slot());
-        let n = server.recv_batch(&mut bufs, &mut out).unwrap();
+        let n = recv_expected(&server, &mut bufs, &mut out, 1);
         assert_eq!(n, 1);
         assert_eq!(bufs[0].as_slice(), b"dual");
         assert!(out[0].src.is_ipv4(), "mapped peer must present as IPv4");

@@ -56,7 +56,12 @@ impl Module for Streamer {
     }
 }
 
-async fn boot() -> (u16, tempfile::TempDir, Arc<Counter>, Arc<atomos::route::Router>) {
+async fn boot() -> (
+    u16,
+    tempfile::TempDir,
+    Arc<Counter>,
+    Arc<atomos::route::Router>,
+) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), b"ABCDEFGH").unwrap();
     let mut big = vec![0u8; 1024 * 1024];
@@ -106,14 +111,21 @@ fn exchange(port: u16, req: &[u8]) -> Vec<u8> {
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     s.write_all(req).unwrap();
     let mut b = Vec::new();
-    let _ = s.read_to_end(&mut b);
+    s.read_to_end(&mut b).expect("complete response before EOF");
     b
 }
 
 fn split_head_body(buf: &[u8]) -> (&str, &[u8]) {
-    let sep = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(buf.len());
+    let sep = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(buf.len());
     let head = std::str::from_utf8(&buf[..sep]).unwrap_or("");
-    let body = if sep + 4 <= buf.len() { &buf[sep + 4..] } else { &[] };
+    let body = if sep + 4 <= buf.len() {
+        &buf[sep + 4..]
+    } else {
+        &[]
+    };
     (head, body)
 }
 
@@ -168,7 +180,10 @@ async fn range_bad() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn head_no_body() {
     let (port, _dir, _, _) = boot().await;
-    let b = exchange(port, b"HEAD / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let b = exchange(
+        port,
+        b"HEAD / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
     let (head, body) = split_head_body(&b);
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     let cl: usize = header(head, "Content-Length")
@@ -176,13 +191,20 @@ async fn head_no_body() {
         .parse()
         .unwrap();
     assert!(cl > 0, "HEAD keeps Content-Length");
-    assert!(body.is_empty(), "HEAD body must be empty, got {} bytes", body.len());
+    assert!(
+        body.is_empty(),
+        "HEAD body must be empty, got {} bytes",
+        body.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn not_modified() {
     let (port, _dir, ctr, _) = boot().await;
-    let b = exchange(port, b"GET /count HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let b = exchange(
+        port,
+        b"GET /count HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
     let (head, _) = split_head_body(&b);
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     assert_eq!(ctr.0.load(Ordering::SeqCst), 1);
@@ -243,5 +265,97 @@ async fn sendfile_1m() {
     );
     let (head, body) = split_head_body(&b);
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(header(head, "Content-Length"), Some("1048576"));
     assert_eq!(body.len(), 1024 * 1024);
+    for (i, &byte) in body.iter().enumerate() {
+        assert_eq!(byte, (i % 251) as u8, "file byte at offset {i}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sendfile_range_preserves_offset() {
+    let (port, _dir, _, _) = boot().await;
+    let b = exchange(
+        port,
+        b"GET /big.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=12345-900000\r\nConnection: close\r\n\r\n",
+    );
+    let (head, body) = split_head_body(&b);
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert_eq!(
+        header(head, "Content-Range"),
+        Some("bytes 12345-900000/1048576")
+    );
+    assert_eq!(body.len(), 900000 - 12345 + 1);
+    for (i, &byte) in body.iter().enumerate() {
+        assert_eq!(byte, ((12345 + i) % 251) as u8, "range byte {i}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipelined_files_drain_before_next_response() {
+    check_pipelined_files(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requests_arriving_during_blocked_file_resume() {
+    check_pipelined_files(true).await;
+}
+
+async fn check_pipelined_files(late_request: bool) {
+    let (port, dir, _, _) = boot().await;
+    // Exceed the send buffer and delay the reader to force writable resumption.
+    let size = 8 * 1024 * 1024;
+    let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.path().join("slow.bin"), &payload).unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(b"GET /slow.bin HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    if late_request {
+        // Let output block before the next readable edge arrives. Those
+        // request bytes remain in the socket until file output resumes.
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    stream
+        .write_all(
+            b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n\
+          GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let mut wire = Vec::new();
+    stream
+        .read_to_end(&mut wire)
+        .expect("all pipelined responses drain");
+    let (head, rest) = split_head_body(&wire);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(
+        header(head, "Content-Length")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap(),
+        size
+    );
+    assert!(
+        rest.len() >= size,
+        "truncated first response: {}",
+        rest.len()
+    );
+    for (i, &byte) in rest[..size].iter().enumerate() {
+        assert_eq!(byte, payload[i], "first file byte {i}");
+    }
+    let (head, rest) = split_head_body(&rest[size..]);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let size = 1024 * 1024;
+    assert_eq!(header(head, "Content-Length"), Some("1048576"));
+    assert!(rest.len() >= size, "truncated second response");
+    for (i, &byte) in rest[..size].iter().enumerate() {
+        assert_eq!(byte, (i % 251) as u8, "second file byte {i}");
+    }
+    let (head, body) = split_head_body(&rest[size..]);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(body, b"ABCDEFGH");
 }

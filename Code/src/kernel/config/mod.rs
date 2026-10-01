@@ -10,7 +10,7 @@ mod defaults;
 mod host;
 mod validate;
 
-pub use host::{HostFacts, physical_cpus, runtime_dir};
+pub use host::{physical_cpus, runtime_dir, HostFacts};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
@@ -207,7 +207,6 @@ pub enum MemoryMode {
     Degrade,
 }
 
-
 impl Config {
     pub fn from_json(raw: &[u8]) -> Result<Self, ServeError> {
         let mut c: Config = serde_json::from_slice(raw)
@@ -245,7 +244,8 @@ mod tests {
 
     #[test]
     fn default_engine_is_epoll() {
-        let c = Config::from_json(br#"{"bind":"127.0.0.1:0","memory_cap_bytes":67108864}"#).unwrap();
+        let c =
+            Config::from_json(br#"{"bind":"127.0.0.1:0","memory_cap_bytes":67108864}"#).unwrap();
         assert_eq!(c.engine, "epoll");
         assert!(!c.http2);
         assert!(!c.http3);
@@ -291,10 +291,7 @@ mod tests {
         assert!(c.refuse_ports.is_empty());
         assert!(c.no_new_privs);
         let sock = c.control_socket.to_string_lossy();
-        assert!(
-            sock.contains("atomos.sock"),
-            "{sock}"
-        );
+        assert!(sock.contains("atomos.sock"), "{sock}");
     }
 
     #[test]

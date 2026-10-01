@@ -1,8 +1,8 @@
 //! Keys list and token helpers.
+use super::io_error_json;
+use serde_json::{json, Value};
 use std::io::Read;
 use std::path::Path;
-use serde_json::{json, Value};
-use super::io_error_json;
 
 pub fn random_token() -> String {
     let mut b = [0u8; 12];

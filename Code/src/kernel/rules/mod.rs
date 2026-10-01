@@ -90,20 +90,14 @@ impl Ruleset {
     }
 
     fn build_inner(rules: Box<[Rule]>, force: bool) -> Result<Self, RuleError> {
-        let s = Self {
-            rules,
-            trie: None,
-        };
+        let s = Self { rules, trie: None };
         s.assert_disjoint()?;
         let trie = if force {
             trie::PathTrie::build(&s.rules, 0)
         } else {
             trie::PathTrie::build(&s.rules, trie::TRIE_MIN_RULES)
         };
-        Ok(Self {
-            trie,
-            ..s
-        })
+        Ok(Self { trie, ..s })
     }
 
     pub fn match_path(&self, method: &str, path: &str) -> Option<&Rule> {
@@ -207,7 +201,10 @@ mod tests {
         assert!(r.match_path("GET", "/api/").is_some());
         assert!(r.match_path("GET", "/api/health").is_some());
         assert_eq!(
-            r.match_method(Method::Get, "/api/health").unwrap().id.as_ref(),
+            r.match_method(Method::Get, "/api/health")
+                .unwrap()
+                .id
+                .as_ref(),
             "a"
         );
     }
@@ -225,8 +222,14 @@ mod tests {
         Rule {
             methods,
             _pad: [0; 6],
-            include: inc.iter().map(|s| parse::pack_pat((*s).to_string())).collect(),
-            exclude: exc.iter().map(|s| parse::pack_pat((*s).to_string())).collect(),
+            include: inc
+                .iter()
+                .map(|s| parse::pack_pat((*s).to_string()))
+                .collect(),
+            exclude: exc
+                .iter()
+                .map(|s| parse::pack_pat((*s).to_string()))
+                .collect(),
             id: id.into(),
             module: id.into(),
             headers: Box::new([]),
@@ -236,7 +239,14 @@ mod tests {
     /// 40 pairwise-disjoint GET prefix rules: `/r{i}/*`.
     fn forty_rules() -> Vec<Rule> {
         (0..40)
-            .map(|i| mk_rule(&format!("r{i}"), Method::Get.bit(), &[&format!("/r{i}/*")], &[]))
+            .map(|i| {
+                mk_rule(
+                    &format!("r{i}"),
+                    Method::Get.bit(),
+                    &[&format!("/r{i}/*")],
+                    &[],
+                )
+            })
             .collect()
     }
 
@@ -303,7 +313,10 @@ mod tests {
         // is NOT possible, so this is the only "/api" rule.
         let rs = Ruleset::from_rules_forced(rules).unwrap();
         assert!(rs.trie_active());
-        assert_eq!(&*rs.match_method(Method::Get, "/api/public/x").unwrap().id, "api");
+        assert_eq!(
+            &*rs.match_method(Method::Get, "/api/public/x").unwrap().id,
+            "api"
+        );
         assert!(rs.match_method(Method::Get, "/api/private/x").is_none());
         // "/api/private" itself is NOT under the exclude (pat_match needs
         // len > len(pre) and a '/' at len(pre)); the scan agrees.
@@ -313,12 +326,7 @@ mod tests {
     #[test]
     fn exact_exclude_fires_only_at_path_end() {
         let mut rules = forty_rules();
-        rules.push(mk_rule(
-            "api",
-            Method::Get.bit(),
-            &["/api/*"],
-            &["/api/x"],
-        ));
+        rules.push(mk_rule("api", Method::Get.bit(), &["/api/*"], &["/api/x"]));
         let rs = Ruleset::from_rules_forced(rules).unwrap();
         assert_eq!(&*rs.match_method(Method::Get, "/api/y").unwrap().id, "api");
         // "/api/x" exactly: the include prefix fires, then the exact
@@ -326,6 +334,46 @@ mod tests {
         assert!(rs.match_method(Method::Get, "/api/x").is_none());
         // "/apix" shares bytes but neither the exclude nor the include.
         assert!(rs.match_method(Method::Get, "/apix").is_none());
+    }
+
+    #[test]
+    fn exact_terminals_do_not_fire_after_a_failed_transition() {
+        let rs = Ruleset::from_rules_forced(vec![
+            mk_rule("exact", Method::Get.bit(), &["/a"], &[]),
+            mk_rule("prefix", Method::Post.bit(), &["/*"], &["/a"]),
+        ])
+        .unwrap();
+        for path in ["/a", "/ab", "/a/child", "/missing"] {
+            for method in [Method::Get, Method::Post] {
+                assert_eq!(
+                    rs.match_method(method, path).map(|r| &r.id),
+                    rs.match_linear(method, path).map(|r| &r.id),
+                    "{method:?} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exclusions_carve_overlapping_includes_into_distinct_routes() {
+        for reverse in [false, true] {
+            let mut rules = vec![
+                mk_rule("static", Method::Get.bit(), &["/*"], &["/api/*", "/health"]),
+                mk_rule("api", Method::Get.bit(), &["/api/*"], &[]),
+                mk_rule("health", Method::Get.bit(), &["/health"], &[]),
+            ];
+            if reverse {
+                rules.reverse();
+            }
+            let rs = Ruleset::from_rules_forced(rules).unwrap();
+            for path in ["/", "/api", "/api/", "/api/x", "/health", "/healthz"] {
+                assert_eq!(
+                    rs.match_method(Method::Get, path).map(|r| &r.id),
+                    rs.match_linear(Method::Get, path).map(|r| &r.id),
+                    "{path}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -385,7 +433,14 @@ mod tests {
         println!("{:>4} {:>10} {:>10}  winner", "R", "scan ns", "trie ns");
         for &r in &[2usize, 4, 8, 16, 24, 32, 40, 48, 56, 63] {
             let rules: Vec<Rule> = (0..r)
-                .map(|i| mk_rule(&format!("r{i}"), Method::Get.bit(), &[&format!("/r{i}/*")], &[]))
+                .map(|i| {
+                    mk_rule(
+                        &format!("r{i}"),
+                        Method::Get.bit(),
+                        &[&format!("/r{i}/*")],
+                        &[],
+                    )
+                })
                 .collect();
             let rs = Ruleset::from_rules_forced(rules).unwrap();
             assert!(rs.trie_active());

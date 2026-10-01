@@ -3,7 +3,7 @@
 Atomos is an HTTP kernel in Rust. A consumer registers named modules.
 A disjoint JSON ruleset maps `(method, path)` to one module.
 
-Linux. Rust 1.97.1 or later.
+Linux. Rust 1.97.1 or later; `rust-toolchain.toml` pins the tested toolchain for rustup users.
 
 ## Build
 
@@ -21,8 +21,13 @@ Run `./compile.sh` on each host.
 
 ```
 cd Code
-cargo test
+cargo test --locked
+cargo test --locked --all-features
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
+
+Vendored transport tests and CI maintenance: [Docs/Maintain.md](Docs/Maintain.md).
 
 ## Start
 

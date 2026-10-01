@@ -76,14 +76,14 @@ case "$cmd" in
     check_rust
     check_cc
     write_device_files
-    run_cargo build --release
+    run_cargo build --locked --release
     ;;
   test)
     check_linux
     check_rust
     check_cc
     write_device_files
-    run_cargo test
+    run_cargo test --locked
     ;;
   write)
     check_linux

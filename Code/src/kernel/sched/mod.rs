@@ -24,12 +24,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-mod ip;
 mod firewall;
+mod ip;
 mod score;
-pub use ip::IpState;
 pub use firewall::BnnFirewall;
-
+pub use ip::IpState;
 
 /// Default per-IP demand limit before the firewall throttles.
 pub const DEFAULT_D_LIMIT: i32 = 64;
@@ -191,7 +190,12 @@ impl Sched {
     /// one mutex. Global limits are divided across shards (each shard
     /// caps at `q_max/n`, `c_max/n`), a standard sharded-counter
     /// approximation.
-    pub fn sharded(n: usize, rule: RuleMode, custom: Weights, limits: Limits) -> Vec<Arc<Mutex<Sched>>> {
+    pub fn sharded(
+        n: usize,
+        rule: RuleMode,
+        custom: Weights,
+        limits: Limits,
+    ) -> Vec<Arc<Mutex<Sched>>> {
         let per_shard = Limits {
             q_max: (limits.q_max / n.max(1) as u32).max(1),
             c_max: (limits.c_max / n.max(1) as u32).max(1),
@@ -531,7 +535,11 @@ mod tests {
             for _ in 0..256 {
                 st.demand_update(1);
             }
-            assert!((8..=15).contains(&st.demand), "start={start} -> {}", st.demand);
+            assert!(
+                (8..=15).contains(&st.demand),
+                "start={start} -> {}",
+                st.demand
+            );
         }
     }
 

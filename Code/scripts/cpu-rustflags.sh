@@ -105,7 +105,8 @@ rustc_host() {
   if ! command -v rustc >/dev/null 2>&1; then
     return 0
   fi
-  rustc -vV 2>/dev/null | awk '/^host:/{print $2; exit}'
+  # Consume the full output: an early awk exit can SIGPIPE rustc under pipefail.
+  rustc -vV 2>/dev/null | awk '/^host:/{print $2}'
 }
 
 detect_avx() {
@@ -134,44 +135,15 @@ detect_avx() {
   printf '%s\n' "${present[@]}"
 }
 
-target_feature_csv() {
-  if ! is_x86; then
-    echo ""
-    return 0
-  fi
-  local flags present=() f
-  flags=$(cpuinfo_flags)
-  mapfile -t present < <(detect_avx)
-
-  local parts=()
-  for f in "${present[@]}"; do
-    [[ -n "$f" ]] && parts+=("+$f")
-  done
-
-  if ! linux_has_avx512 "$flags"; then
-    for f in "${AVX512_RUSTC[@]}"; do
-      parts+=("-$f")
-    done
-  fi
-  if ! linux_has_avx10 "$flags"; then
-    parts+=("-avx10.1" "-avx10.2")
-  fi
-
-  local IFS=,
-  echo "${parts[*]}"
-}
-
 # Fill nameref array with rustc -C tokens: flag then value.
 rustc_c_pairs() {
   local -n _out=$1
   _out=()
-  local feat ld
-  feat=$(target_feature_csv)
+  local ld
   ld=$(detect_ld)
+  # Let rustc select supported host features. Translating /proc names
+  # duplicates LLVM detection and emits unstable AVX10 flags on stable Rust.
   _out+=("-C" "target-cpu=native")
-  if [[ -n "$feat" ]]; then
-    _out+=("-C" "target-feature=${feat}")
-  fi
   if [[ -n "$ld" ]]; then
     _out+=("-C" "link-arg=-fuse-ld=${ld}")
   fi

@@ -79,19 +79,17 @@ impl IoUringReactor {
     /// memory (iovecs, buffers, sockaddrs) must stay valid and untouched
     /// until the corresponding completion is drained; the kernel may
     /// read or write it at any time up to that point.
-    pub fn push(
-        &mut self,
-        user_data: u64,
-        entry: io_uring::squeue::Entry,
-    ) -> std::io::Result<()> {
+    pub fn push(&mut self, user_data: u64, entry: io_uring::squeue::Entry) -> std::io::Result<()> {
         // SAFETY: `push` copies the entry into the ring's SQ memory, so
         // the entry itself need not outlive this call; the buffers it
         // references are kept alive by the datapath's lifecycle contract
         // (see the module docs).
-        unsafe { self.ring.submission().push(&entry) }
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::WouldBlock, "io_uring submission queue full")
-            })?;
+        unsafe { self.ring.submission().push(&entry) }.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "io_uring submission queue full",
+            )
+        })?;
         self.pending.push(user_data);
         Ok(())
     }
@@ -116,24 +114,18 @@ impl IoUringReactor {
     /// Submit a single-shot poll for `fd`'s readiness (`flags` are
     /// `<poll.h>` bits, e.g. `POLLIN`) with `user_data` as the token.
     /// Completes once; the caller re-arms by submitting again.
-    pub fn submit_poll(
-        &mut self,
-        fd: i32,
-        flags: u32,
-        user_data: u64,
-    ) -> std::io::Result<()> {
+    pub fn submit_poll(&mut self, fd: i32, flags: u32, user_data: u64) -> std::io::Result<()> {
         let entry = io_uring::opcode::PollAdd::new(io_uring::types::Fd(fd), flags)
             .build()
             .user_data(user_data);
         // SAFETY: a poll has no buffer, so the only lifetime is the fd,
         // which outlives the datapath.
-        unsafe { self.ring.submission().push(&entry) }
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "io_uring submission queue full",
-                )
-            })?;
+        unsafe { self.ring.submission().push(&entry) }.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "io_uring submission queue full",
+            )
+        })?;
         self.pending.push(user_data);
         Ok(())
     }
@@ -160,10 +152,12 @@ impl IoUringReactor {
             .user_data(0);
         // SAFETY: push copies the entry into the ring's SQ memory; the
         // cancel carries no buffer pointer.
-        unsafe { self.ring.submission().push(&entry) }
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::WouldBlock, "io_uring submission queue full")
-            })?;
+        unsafe { self.ring.submission().push(&entry) }.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "io_uring submission queue full",
+            )
+        })?;
         self.ring.submit().map(|_| ())
     }
 
@@ -339,6 +333,9 @@ struct TcpRingConn {
     recv_msg: Box<libc::msghdr>,
     /// Legacy-mode read buffer (single-shot path; unused in modern).
     legacy_buf: Box<[u8; CONN_BUF]>,
+    /// Unsent range of the legacy buffer. Do not overwrite it with another
+    /// read until every byte has been accepted by the socket.
+    legacy_out: BufMeta,
     /// Buffer ids in this connection's provided group, in provide order
     /// (the kernel removes from the group head, FIFO).
     provided: VecDeque<u32>,
@@ -365,6 +362,7 @@ impl TcpRingConn {
             fd,
             recv_msg: Box::new(tcp_recv_msg()),
             legacy_buf: Box::new([0u8; CONN_BUF]),
+            legacy_out: BufMeta::default(),
             provided: VecDeque::new(),
             to_send: VecDeque::new(),
             in_kernel: Vec::new(),
@@ -560,12 +558,6 @@ impl IoUringDatapath {
             pool: BufferPool::new(),
             accept_multi: false,
         };
-        for i in 0..CONN_CAP {
-            datapath
-                .conn_table
-                .initialize(i, Connection::new("0.0.0.0:0".parse().unwrap(), 0));
-        }
-
         // Modern path needs: kernel >= 6.0, registered buffers, and the
         // provided-buffer machinery. Fall back to legacy when any piece
         // is unavailable so the datapath never fails to start.
@@ -635,7 +627,8 @@ impl IoUringDatapath {
             completions.clear();
             self.ring
                 .drain_full(|ud, res, flags| completions.push((ud, res, flags)));
-            if std::env::var_os("FDS_IOU_DEBUG").is_some() && last_beat.elapsed().as_millis() >= 500 {
+            if std::env::var_os("FDS_IOU_DEBUG").is_some() && last_beat.elapsed().as_millis() >= 500
+            {
                 let (p, b, d) = metrics.totals();
                 let free = self.pool.free.len();
                 let outstanding: usize = self.conns.values().map(|c| c.outstanding).sum();
@@ -715,7 +708,11 @@ impl IoUringDatapath {
                 if let Some(c) = self.conns.get_mut(&token) {
                     c.poll_out = false;
                 }
-                self.flush_sends(token)?;
+                if self.legacy {
+                    self.submit_legacy_tcp_write(token)?;
+                } else {
+                    self.flush_sends(token)?;
+                }
             }
             KIND_TCP_CLOSE => {
                 // RemoveBuffers completion: `res` = buffers removed from
@@ -772,7 +769,11 @@ impl IoUringDatapath {
             };
             match self.conn_table.acquire_index() {
                 Some(idx) => {
-                    self.conn_table.conn_mut(idx).cold.peer = peer;
+                    // SAFETY: this newly allocated slot is exclusively owned
+                    // by this single-owner datapath until connection close.
+                    let state = unsafe { self.conn_table.conn_mut(idx) };
+                    *state = Connection::new(peer, crate::util::now_ticks());
+                    state.hot.fd = fd;
                     let token = ConnectionId::new(self.core as u32, idx as u32).as_u64();
                     self.conns.insert(token, TcpRingConn::new(fd));
                     if self.legacy {
@@ -829,10 +830,10 @@ impl IoUringDatapath {
                 // the payload offset and length.
                 // SAFETY: the buffer is pool-owned and registered; the
                 // kernel wrote the header before completing.
-                let hdr = unsafe {
-                    (self.pool.ptr_mut(buf_id) as *const RecvMsgOut).read_unaligned()
-                };
-                let off = std::mem::size_of::<RecvMsgOut>() + hdr.namelen as usize
+                let hdr =
+                    unsafe { (self.pool.ptr_mut(buf_id) as *const RecvMsgOut).read_unaligned() };
+                let off = std::mem::size_of::<RecvMsgOut>()
+                    + hdr.namelen as usize
                     + hdr.controllen as usize;
                 let plen = hdr.payloadlen as usize;
                 if off + plen > CONN_BUF {
@@ -848,7 +849,9 @@ impl IoUringDatapath {
                 c.to_send.push_back(buf_id);
                 c.outstanding += 1;
                 let slot = ConnectionId::from_u64(token).slot() as usize;
-                let hot = &mut self.conn_table.conn_mut(slot).hot;
+                // SAFETY: the live connection map owns this slot; callbacks
+                // run sequentially on this datapath's owning thread.
+                let hot = &mut unsafe { self.conn_table.conn_mut(slot) }.hot;
                 hot.seq = hot.seq.wrapping_add(plen as u32);
                 hot.last_activity = crate::util::now_ticks();
                 metrics.add_packets(core, 1);
@@ -915,8 +918,36 @@ impl IoUringDatapath {
         if self.legacy {
             let token = user_data & !KIND_MASK;
             match res {
-                Ok(_) => self.submit_legacy_tcp_read(token)?,
-                Err(_) => {
+                Ok(n) if n > 0 => {
+                    let Some(c) = self.conns.get_mut(&token) else {
+                        return Ok(());
+                    };
+                    let written = n.min(u32::from(c.legacy_out.len)) as u16;
+                    c.legacy_out.off += written;
+                    c.legacy_out.len -= written;
+                    metrics.add_bytes(core, u64::from(written));
+                    if c.legacy_out.len == 0 {
+                        self.submit_legacy_tcp_read(token)?;
+                    } else {
+                        self.submit_legacy_tcp_write(token)?;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Some(c) = self.conns.get_mut(&token) {
+                        if !c.poll_out {
+                            self.ring.submit_poll(
+                                c.fd,
+                                poll_flags(Interest::Writable),
+                                KIND_TCP_POLLOUT | token,
+                            )?;
+                            c.poll_out = true;
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    self.submit_legacy_tcp_write(token)?;
+                }
+                _ => {
                     metrics.add_drops(core, 1);
                     self.close_tcp(token, metrics, core)?;
                 }
@@ -1016,8 +1047,11 @@ impl IoUringDatapath {
                         self.pool.mark_owned(buf_id, meta.off, meta.len);
                     }
                     if !c.poll_out {
-                        self.ring
-                            .submit_poll(c.fd, poll_flags(Interest::Writable), KIND_TCP_POLLOUT | token)?;
+                        self.ring.submit_poll(
+                            c.fd,
+                            poll_flags(Interest::Writable),
+                            KIND_TCP_POLLOUT | token,
+                        )?;
                         c.poll_out = true;
                     }
                 }
@@ -1049,14 +1083,11 @@ impl IoUringDatapath {
                 let meta = self.pool.metas[buf_id as usize];
                 let ptr = unsafe { self.pool.ptr(buf_id).add(meta.off as usize) };
                 let user_data = KIND_TCP_SEND | ((buf_id as u64) << 32) | (token & 0xFFFF_FFFF);
-                let entry = io_uring::opcode::Send::new(
-                    io_uring::types::Fd(c.fd),
-                    ptr,
-                    meta.len as u32,
-                )
-                .build()
-                .flags(Flags::ASYNC)
-                .user_data(user_data);
+                let entry =
+                    io_uring::opcode::Send::new(io_uring::types::Fd(c.fd), ptr, meta.len as u32)
+                        .build()
+                        .flags(Flags::ASYNC)
+                        .user_data(user_data);
                 // Push BEFORE moving the buffer between lists: a failed
                 // push must leave the queue untouched (the buffer is
                 // retried on the next flush).
@@ -1106,7 +1137,9 @@ impl IoUringDatapath {
             let (id, addr) = {
                 let c = self.conns.get_mut(&token);
                 let Some(c) = c else { break };
-                let Some(id) = self.pool.take_free() else { break };
+                let Some(id) = self.pool.take_free() else {
+                    break;
+                };
                 c.provided.push_back(id);
                 (id, self.pool.ptr_mut(id))
             };
@@ -1138,7 +1171,10 @@ impl IoUringDatapath {
             return Ok(());
         }
         let user_data = KIND_TCP_READ | token;
-        let conn_msg = self.conns.get(&token).map(|c| &*c.recv_msg as *const libc::msghdr);
+        let conn_msg = self
+            .conns
+            .get(&token)
+            .map(|c| &*c.recv_msg as *const libc::msghdr);
         let Some(msg) = conn_msg else { return Ok(()) };
         // SAFETY: `recv_msg` is boxed and lives until the op terminates;
         // only msg_namelen/msg_controllen are read for a stream socket.
@@ -1226,7 +1262,11 @@ impl IoUringDatapath {
         if done {
             if let Some(_c) = self.conns.remove(&token) {
                 let slot = ConnectionId::from_u64(token).slot() as usize;
-                self.conn_table.release_slot(slot);
+                // SAFETY: close is complete and the connection was removed;
+                // no guard owns the manually allocated table slot.
+                unsafe {
+                    self.conn_table.release_slot(slot);
+                }
             }
         }
         Ok(())
@@ -1374,10 +1414,18 @@ impl IoUringDatapath {
                 metrics.add_packets(core, 1);
                 metrics.add_bytes(core, n as u64);
                 let slot = ConnectionId::from_u64(token).slot() as usize;
-                let hot = &mut self.conn_table.conn_mut(slot).hot;
+                // SAFETY: the live legacy connection exclusively owns this
+                // slot, and its callbacks are processed sequentially.
+                let hot = &mut unsafe { self.conn_table.conn_mut(slot) }.hot;
                 hot.seq = hot.seq.wrapping_add(n as u32);
                 hot.last_activity = crate::util::now_ticks();
-                self.submit_legacy_tcp_write(token, n)?;
+                if let Some(c) = self.conns.get_mut(&token) {
+                    c.legacy_out = BufMeta {
+                        off: 0,
+                        len: n as u16,
+                    };
+                }
+                self.submit_legacy_tcp_write(token)?;
             }
             Ok(_) => {
                 self.close_tcp(token, metrics, core)?;
@@ -1390,17 +1438,22 @@ impl IoUringDatapath {
         Ok(())
     }
 
-    /// Echo `n` received bytes back to `token`'s connection (legacy).
-    fn submit_legacy_tcp_write(&mut self, token: u64, n: usize) -> std::io::Result<()> {
-        let (fd, buf) = {
+    /// Echo the remaining received bytes back to `token` (legacy).
+    fn submit_legacy_tcp_write(&mut self, token: u64) -> std::io::Result<()> {
+        let (fd, buf, len) = {
             let c = self.conns.get_mut(&token);
             let Some(c) = c else { return Ok(()) };
-            (c.fd, c.legacy_buf.as_ptr())
+            if c.closing || c.legacy_out.len == 0 {
+                return Ok(());
+            }
+            // SAFETY: the pending range stays within this connection's buffer.
+            let buf = unsafe { c.legacy_buf.as_ptr().add(c.legacy_out.off as usize) };
+            (c.fd, buf, u32::from(c.legacy_out.len))
         };
-        // SAFETY: the buffer holds `n` received bytes; the kernel only
-        // reads them for the duration of the write op.
+        // SAFETY: the buffer's remaining range stays valid and is not
+        // overwritten until all partial writes complete.
         let user_data = KIND_TCP_SEND | token;
-        let entry = io_uring::opcode::Write::new(io_uring::types::Fd(fd), buf, n as u32)
+        let entry = io_uring::opcode::Write::new(io_uring::types::Fd(fd), buf, len)
             .build()
             .user_data(user_data);
         self.ring.push(user_data, entry)
@@ -1416,7 +1469,10 @@ impl IoUringDatapath {
                     libc::close(c.fd);
                 }
             }
-            self.conn_table.release_slot(slot);
+            // SAFETY: this legacy connection was removed exactly once.
+            unsafe {
+                self.conn_table.release_slot(slot);
+            }
         }
         Ok(())
     }
@@ -1424,7 +1480,9 @@ impl IoUringDatapath {
     /// Submit the single-shot poll for the metrics listener.
     fn submit_poll(&mut self) -> std::io::Result<()> {
         match self.metrics_fd {
-            Some(fd) => self.ring.submit_poll(fd, poll_flags(Interest::Readable), KIND_POLL),
+            Some(fd) => self
+                .ring
+                .submit_poll(fd, poll_flags(Interest::Readable), KIND_POLL),
             None => Ok(()),
         }
     }
@@ -1433,10 +1491,11 @@ impl IoUringDatapath {
     fn submit_timeout(&mut self) -> std::io::Result<()> {
         // SAFETY: `self.timeout` has a stable address for the datapath's
         // lifetime; the kernel reads it while the op is pending.
-        let entry = io_uring::opcode::Timeout::new(&self.timeout as *const io_uring::types::Timespec)
-            .count(1)
-            .build()
-            .user_data(KIND_TIMEOUT);
+        let entry =
+            io_uring::opcode::Timeout::new(&self.timeout as *const io_uring::types::Timespec)
+                .count(1)
+                .build()
+                .user_data(KIND_TIMEOUT);
         self.ring.push(KIND_TIMEOUT, entry)
     }
 }
@@ -1445,12 +1504,16 @@ impl Drop for IoUringDatapath {
     fn drop(&mut self) {
         // Close the accepted connection fds this datapath owns (the UDP
         // socket and listener are borrowed from the engine).
-        for (_, c) in self.conns.drain() {
+        // Keep connection buffers alive while the ring (the first field)
+        // tears down. Draining the map here would free msghdr/read buffers
+        // before the ring cancels the operations that still reference them.
+        for c in self.conns.values_mut() {
             if c.fd >= 0 {
                 // SAFETY: accepted fds owned by this datapath, closed once.
                 unsafe {
                     libc::close(c.fd);
                 }
+                c.fd = -1;
             }
         }
     }
@@ -1523,6 +1586,39 @@ mod tests {
     }
 
     #[test]
+    fn legacy_partial_send_keeps_tail() {
+        use std::os::fd::IntoRawFd;
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut datapath =
+            IoUringDatapath::new(0, udp.as_raw_fd(), tcp.as_raw_fd(), None, 128, 0).unwrap();
+        datapath.legacy = true;
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let idx = datapath.conn_table.acquire_index().unwrap();
+        let token = ConnectionId::new(0, idx as u32).as_u64();
+        let mut conn = TcpRingConn::new(stream.into_raw_fd());
+        conn.legacy_out = BufMeta { off: 0, len: 32 };
+        datapath.conns.insert(token, conn);
+        let metrics = Metrics::new(1);
+
+        // Synthetic completions deterministically exercise a short write.
+        // SQEs remain unsubmitted: no kernel operation references these buffers.
+        datapath
+            .dispatch_tcp_send(KIND_TCP_SEND | token, Ok(7), 0, &metrics, 0)
+            .unwrap();
+        let conn = &datapath.conns[&token];
+        assert_eq!(conn.legacy_out.off, 7);
+        assert_eq!(conn.legacy_out.len, 25);
+        assert!(!conn.recv_armed, "must not overwrite an unsent tail");
+        datapath
+            .dispatch_tcp_send(KIND_TCP_SEND | token, Ok(25), 0, &metrics, 0)
+            .unwrap();
+        let conn = &datapath.conns[&token];
+        assert_eq!(conn.legacy_out.len, 0);
+        assert!(conn.recv_armed, "reads resume only after the tail drains");
+    }
+
+    #[test]
     fn io_uring_setup_ok() {
         IoUringReactor::new(8, 0).expect("io_uring setup failed");
     }
@@ -1537,10 +1633,13 @@ mod tests {
         )?;
         let mut reactor = IoUringReactor::new(8, 0)?;
         let mut buf = [0u8; 64];
-        let entry =
-            io_uring::opcode::Read::new(io_uring::types::Fd(r.as_raw_fd()), buf.as_mut_ptr(), buf.len() as u32)
-                .build()
-                .user_data(1);
+        let entry = io_uring::opcode::Read::new(
+            io_uring::types::Fd(r.as_raw_fd()),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        )
+        .build()
+        .user_data(1);
         // SAFETY: push copies the entry into the SQ; `buf` stays alive
         // until the completion is drained below.
         unsafe { reactor.ring.submission().push(&entry) }
@@ -1623,7 +1722,13 @@ mod tests {
         });
 
         datapath
-            .run(&(move || stop.load(Ordering::Relaxed)), &metrics, 0, &mut None, true)
+            .run(
+                &(move || stop.load(Ordering::Relaxed)),
+                &metrics,
+                0,
+                &mut None,
+                true,
+            )
             .expect("datapath run failed");
         client.join().unwrap();
     }
@@ -1636,6 +1741,15 @@ mod tests {
     /// the full payload must echo back.
     #[test]
     fn datapath_tcp_write_flood_echoes() {
+        tcp_write_flood(false);
+    }
+
+    #[test]
+    fn legacy_datapath_tcp_write_flood_echoes() {
+        tcp_write_flood(true);
+    }
+
+    fn tcp_write_flood(force_legacy: bool) {
         let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let tcp_addr = tcp.local_addr().unwrap();
@@ -1661,6 +1775,9 @@ mod tests {
 
         let mut datapath =
             IoUringDatapath::new(0, udp.as_raw_fd(), tcp.as_raw_fd(), None, 512, 0).unwrap();
+        if force_legacy {
+            datapath.legacy = true;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let metrics = Metrics::new(1);
@@ -1701,6 +1818,7 @@ mod tests {
                     match stream.read(&mut rbuf) {
                         Ok(0) => panic!("server closed mid-flood"),
                         Ok(n) => {
+                            assert!(rbuf[..n].iter().all(|&b| b == 0x42), "echo data corrupted");
                             echoed += n;
                             progressed = true;
                         }
@@ -1727,15 +1845,18 @@ mod tests {
                     }
                 }
             }
-            assert!(
-                echoed >= TOTAL,
-                "echo incomplete: {echoed}/{TOTAL}"
-            );
+            assert!(echoed >= TOTAL, "echo incomplete: {echoed}/{TOTAL}");
             assert!(std::time::Instant::now() < deadline, "flood too slow");
         });
 
         datapath
-            .run(&(move || stop.load(Ordering::Relaxed)), &metrics, 0, &mut None, false)
+            .run(
+                &(move || stop.load(Ordering::Relaxed)),
+                &metrics,
+                0,
+                &mut None,
+                false,
+            )
             .expect("datapath run failed");
         client.join().unwrap();
     }

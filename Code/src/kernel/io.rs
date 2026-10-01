@@ -135,22 +135,38 @@ pub struct FileBody {
 }
 
 impl FileBody {
-    /// Blocking `pread` of the whole range into memory. Used by the
-    /// tokio paths (H1/H2/H3), which cannot sendfile: framing and TLS
-    /// need the bytes in memory. Callers on a tokio worker should run
-    /// this on a blocking thread (`tokio::task::spawn_blocking`).
+    /// Blocking `pread` of the whole range into memory. Prefer the bounded
+    /// chunk reader in `net::file_body` for network output. Callers on a Tokio
+    /// worker must run this on a blocking thread.
     pub fn read_to_bytes(&self) -> std::io::Result<Bytes> {
         use std::os::unix::fs::FileExt;
-        let mut buf = vec![0u8; self.len as usize];
+        let len = usize::try_from(self.len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file range does not fit address space",
+            )
+        })?;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(len).map_err(std::io::Error::other)?;
+        buf.resize(len, 0);
         let mut got = 0usize;
         while got < buf.len() {
-            let n = self.file.read_at(&mut buf[got..], self.offset + got as u64)?;
+            let offset = self.offset.checked_add(got as u64).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "file offset overflow")
+            })?;
+            let n = match self.file.read_at(&mut buf[got..], offset) {
+                Ok(n) => n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
             if n == 0 {
-                break;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "file shorter than declared range",
+                ));
             }
             got += n;
         }
-        buf.truncate(got);
         Ok(Bytes::from(buf))
     }
 }
@@ -158,7 +174,9 @@ impl FileBody {
 /// Chunk receiver for a streaming response body. Wrapped so `Out` stays
 /// `Clone` (the cache clones `Out`); take it exactly once.
 #[derive(Clone, Debug)]
-pub struct StreamBody(pub std::sync::Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Receiver<Bytes>>>>);
+pub struct StreamBody(
+    pub std::sync::Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Receiver<Bytes>>>>,
+);
 
 impl StreamBody {
     pub fn take(&self) -> tokio::sync::mpsc::Receiver<Bytes> {

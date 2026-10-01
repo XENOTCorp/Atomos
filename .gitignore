@@ -1,5 +1,5 @@
 /target
-/Code/target
+**/target/
 /Code/.cargo/config.toml
 **/.atomos/
 .local/

@@ -76,6 +76,11 @@ impl Status {
         self.0
     }
 
+    /// Informational, 204, 205 and 304 responses cannot carry payload data.
+    pub const fn allows_body(self) -> bool {
+        self.0 >= 200 && self.0 != 204 && self.0 != 205 && self.0 != 304
+    }
+
     pub fn phrase(self) -> &'static str {
         match self.0 {
             100 => "Continue",

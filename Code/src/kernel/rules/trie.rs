@@ -93,52 +93,45 @@ impl PathTrie {
         Some(t)
     }
 
-    /// One pass over the path bytes; `cand` is the first include
-    /// terminal whose method mask admits the request (at most one rule
-    /// can ever match a path: `assert_disjoint` is the load-time
-    /// theorem this relies on). An exclude of the candidate anywhere on
-    /// the path vetoes the match, mirroring `pat_match` exactly: prefix
-    /// excludes fire when visited, exact excludes only at the final
-    /// node.
+    /// Accumulate all includes and exclusions in one allocation-free walk.
+    /// Includes may overlap before exclusions carve out the disjoint rule
+    /// languages, so selecting the first include prematurely is incorrect.
     pub(crate) fn match_rule(&self, bit: u16, path: &str) -> Option<usize> {
         let mut node = 0usize;
-        let mut cand: Option<u16> = None;
-        let mut exc_seen: u64 = 0;
+        let mut candidates = 0u64;
+        let mut excluded = 0u64;
+        let mut reached_end = true;
         for &b in path.as_bytes() {
             let Some(next) = self.descend(node, b) else {
+                reached_end = false;
                 break;
             };
             node = next;
             let n = &self.nodes[node];
             for &r in &n.prefix_excludes {
-                exc_seen |= 1u64 << r;
+                excluded |= 1u64 << r;
             }
-            if cand.is_none() {
-                for &(r, m) in &n.prefix_terms {
-                    if m & bit != 0 {
-                        cand = Some(r);
-                        break;
-                    }
+            for &(r, methods) in &n.prefix_terms {
+                if methods & bit != 0 {
+                    candidates |= 1u64 << r;
                 }
             }
         }
-        let n = &self.nodes[node];
-        for &r in &n.exact_excludes {
-            exc_seen |= 1u64 << r;
-        }
-        if cand.is_none() {
-            for &(r, m) in &n.exact_terms {
-                if m & bit != 0 {
-                    cand = Some(r);
-                    break;
+        // Exact terminals fire only after consuming the entire path, not
+        // when a missing transition leaves us at an ancestor's terminal.
+        if reached_end {
+            let n = &self.nodes[node];
+            for &r in &n.exact_excludes {
+                excluded |= 1u64 << r;
+            }
+            for &(r, methods) in &n.exact_terms {
+                if methods & bit != 0 {
+                    candidates |= 1u64 << r;
                 }
             }
         }
-        let r = cand?;
-        if exc_seen & (1u64 << r) != 0 {
-            return None;
-        }
-        Some(r as usize)
+        let matched = candidates & !excluded;
+        (matched != 0).then(|| matched.trailing_zeros() as usize)
     }
 
     /// Descend one byte: binary search over the sorted transition list.
@@ -168,7 +161,10 @@ impl PathTrie {
 
     /// Single-byte descend-or-create.
     fn insert_byte(&mut self, node: usize, b: u8) -> usize {
-        match self.nodes[node].children.binary_search_by_key(&b, |&(c, _)| c) {
+        match self.nodes[node]
+            .children
+            .binary_search_by_key(&b, |&(c, _)| c)
+        {
             Ok(i) => self.nodes[node].children[i].1 as usize,
             Err(i) => {
                 let id = self.nodes.len() as u32;

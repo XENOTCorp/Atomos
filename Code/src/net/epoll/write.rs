@@ -1,8 +1,8 @@
 //! Flush encoded bytes and sendfile. TLS encrypts; no sendfile through rustls.
-use std::io;
-use std::os::fd::AsRawFd;
 use super::conn::Conn;
 use super::tlsio;
+use std::io;
+use std::os::fd::AsRawFd;
 
 pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
     if c.tls.is_some() {
@@ -14,13 +14,11 @@ pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
         // so a partial write does not drop the tail.
         let n = match c.stream.write(rest) {
             Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "epoll: send zero",
-                ));
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "epoll: send zero"));
             }
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
         c.out_off += n;
@@ -35,6 +33,9 @@ pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
             Some(s) => s,
             None => break,
         };
+        if sf.len == 0 {
+            continue;
+        }
         // SAFETY: both fds are valid and owned by this connection; the
         // offset/count stay within the file range the fd was opened
         // for (StaticMod sets offset=0, len=file size).
@@ -43,7 +44,7 @@ pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
                 c.stream.as_raw_fd(),
                 sf.file.as_raw_fd(),
                 &mut sf.offset as *mut libc::off_t,
-                sf.len as usize,
+                sf.len.min(0x7fff_f000) as usize,
             )
         };
         if n < 0 {
@@ -51,6 +52,10 @@ pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
             if e.kind() == io::ErrorKind::WouldBlock {
                 c.pending_sf = Some(sf);
                 return Ok(());
+            }
+            if e.kind() == io::ErrorKind::Interrupted {
+                c.pending_sf = Some(sf);
+                continue;
             }
             return Err(e);
         }
@@ -68,7 +73,7 @@ pub(crate) fn flush_out(c: &mut Conn<'_>) -> io::Result<()> {
             // Range fully sent.
             continue;
         }
-        sf.offset += n as libc::off_t;
+        // sendfile updates the supplied offset itself; only reduce the remaining length.
         sf.len -= n;
         c.pending_sf = Some(sf);
     }
@@ -103,7 +108,10 @@ fn flush_out_tls(c: &mut Conn<'_>) -> io::Result<()> {
             Some(s) => s,
             None => break,
         };
-        let want = (sf.len as usize).min(tmp.len());
+        if sf.len == 0 {
+            continue;
+        }
+        let want = sf.len.min(tmp.len() as u64) as usize;
         let n = {
             let n = unsafe {
                 libc::pread(
@@ -118,6 +126,10 @@ fn flush_out_tls(c: &mut Conn<'_>) -> io::Result<()> {
                 if e.kind() == io::ErrorKind::WouldBlock {
                     c.pending_sf = Some(sf);
                     return Ok(());
+                }
+                if e.kind() == io::ErrorKind::Interrupted {
+                    c.pending_sf = Some(sf);
+                    continue;
                 }
                 return Err(e);
             }

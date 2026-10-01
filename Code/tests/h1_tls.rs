@@ -17,8 +17,8 @@ fn install_ring() {
 }
 
 fn mint_localhost() -> (Vec<u8>, Vec<u8>, CertificateDer<'static>) {
-    let ck = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-        .unwrap();
+    let ck =
+        rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
     let cert_pem = ck.cert.pem();
     let key_pem = ck.key_pair.serialize_pem();
     let der = CertificateDer::from(ck.cert);
@@ -105,7 +105,45 @@ async fn handshake_ok() {
     let cfg = client_cfg(der, &[b"http/1.1"]);
     let (_kind, body) = h1_get(port, cfg, "localhost").expect("handshake");
     let sl = status_line(&body);
-    assert!(sl.starts_with("HTTP/1.1 200"), "{sl:?} {}", String::from_utf8_lossy(&body));
+    assert!(
+        sl.starts_with("HTTP/1.1 200"),
+        "{sl:?} {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_file_drains_before_close() {
+    let (port, dir, der) = boot_tls().await;
+    let payload: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.path().join("large.bin"), &payload).unwrap();
+    let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let conn = ClientConnection::new(
+        client_cfg(der, &[b"http/1.1"]),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
+    let mut stream = StreamOwned::new(conn, sock);
+    stream
+        .write_all(b"GET /large.bin HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let mut wire = Vec::new();
+    // The current server closes TCP without close_notify. rustls reports
+    // UnexpectedEof in that case; the HTTP body must still be complete.
+    if let Err(error) = stream.read_to_end(&mut wire) {
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+    let end = wire.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = std::str::from_utf8(&wire[..end]).unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head.contains("Content-Length: 8388608"), "{head}");
+    let body = &wire[end + 4..];
+    assert_eq!(body.len(), payload.len(), "TLS file response truncated");
+    for (i, &byte) in body.iter().enumerate() {
+        assert_eq!(byte, payload[i], "TLS file byte at offset {i}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -84,13 +84,10 @@ fn start_epoch(engine: &Engine) {
 /// Fuel/epoch/memory traps become [`ServeError::Capacity`]. Other wasm errors stay Module.
 pub(crate) fn fuel_to_capacity(err: wasmtime::Error) -> ServeError {
     for cause in err.chain() {
-        if let Some(trap) = cause.downcast_ref::<wasmtime::Trap>() {
-            match trap {
-                wasmtime::Trap::OutOfFuel | wasmtime::Trap::Interrupt => {
-                    return ServeError::Capacity;
-                }
-                _ => {}
-            }
+        if let Some(wasmtime::Trap::OutOfFuel | wasmtime::Trap::Interrupt) =
+            cause.downcast_ref::<wasmtime::Trap>()
+        {
+            return ServeError::Capacity;
         }
     }
     let s = err.to_string();
@@ -221,8 +218,7 @@ impl Module for WasmMod {
         store.set_epoch_deadline(1_000);
         store.set_fuel(self.fuel).map_err(fuel_to_capacity)?;
         let _live = LiveGuard::enter();
-        let guest = match bindings::Module::instantiate(&mut store, &self.component, &self.linker)
-        {
+        let guest = match bindings::Module::instantiate(&mut store, &self.component, &self.linker) {
             Ok(g) => g,
             Err(e) => return capacity_to_504(fuel_to_capacity(e)),
         };

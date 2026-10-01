@@ -41,7 +41,10 @@ impl IpState {
     #[inline]
     pub fn demand_update(&mut self, n: u32) {
         let in_band = (self.demand as u64) <= (8 * n as u64) + 7;
-        self.demand = self.demand.wrapping_add(n).wrapping_sub(self.demand >> EMA_SHIFT);
+        self.demand = self
+            .demand
+            .wrapping_add(n)
+            .wrapping_sub(self.demand >> EMA_SHIFT);
         debug_assert!(
             !in_band || (self.demand as u64) <= (8 * n as u64) + 7,
             "EMA band [8n, 8n+7] is invariant under the in-band update"

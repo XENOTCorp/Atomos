@@ -62,7 +62,6 @@ pub fn after_bind(cfg: &Config) -> Result<(), ServeError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

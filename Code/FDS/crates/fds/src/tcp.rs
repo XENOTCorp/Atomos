@@ -61,7 +61,8 @@ fn sockaddr_to_socket_addr(ss: &libc::sockaddr_storage) -> SocketAddr {
             // SAFETY: AF_INET guarantees the kernel wrote a `sockaddr_in`
             // at this address; both structs start with the family field
             // and `sockaddr_in` is a prefix of `sockaddr_storage`.
-            let sin = unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let sin =
+                unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
             SocketAddr::new(
                 std::net::IpAddr::V4(Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes())),
                 u16::from_be(sin.sin_port),
@@ -69,7 +70,8 @@ fn sockaddr_to_socket_addr(ss: &libc::sockaddr_storage) -> SocketAddr {
         }
         libc::AF_INET6 => {
             // SAFETY: as above, with `sockaddr_in6`.
-            let sin6 = unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            let sin6 =
+                unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
             let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
             let port = u16::from_be(sin6.sin6_port);
             if let Some(v4) = ip.to_ipv4_mapped() {
@@ -216,7 +218,12 @@ impl TcpListener {
             // inflate the queue, so TFO is treated as off unless both are
             // set. Kernels without TFO reject the option (EOPNOTSUPP);
             // that is tolerated, everything else is an error.
-            match set_int_sockopt(fd, libc::IPPROTO_TCP, libc::TCP_FASTOPEN, cfg.fastopen as libc::c_int) {
+            match set_int_sockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_FASTOPEN,
+                cfg.fastopen as libc::c_int,
+            ) {
                 Err(e) if e.raw_os_error() != Some(libc::EOPNOTSUPP) => return Err(e),
                 _ => {}
             }
@@ -376,7 +383,11 @@ impl TcpStream {
             // SAFETY: every iovec points into a caller-owned mutable
             // slice valid for the call; readv fills them in order.
             let n = unsafe {
-                libc::readv(self.fd.as_raw_fd(), iov.as_ptr(), (end - off) as libc::c_int)
+                libc::readv(
+                    self.fd.as_raw_fd(),
+                    iov.as_ptr(),
+                    (end - off) as libc::c_int,
+                )
             };
             if n < 0 {
                 let err = std::io::Error::last_os_error();
@@ -448,7 +459,11 @@ impl TcpStream {
             // SAFETY: every iovec points into a caller-owned slice valid
             // for the call; writev reads them in order.
             let n = unsafe {
-                libc::writev(self.fd.as_raw_fd(), iov.as_ptr(), (end - off) as libc::c_int)
+                libc::writev(
+                    self.fd.as_raw_fd(),
+                    iov.as_ptr(),
+                    (end - off) as libc::c_int,
+                )
             };
             if n < 0 {
                 let err = std::io::Error::last_os_error();
@@ -603,17 +618,14 @@ mod tests {
     fn tcp_ipv6_loopback_echo() {
         // IPv6 loopback is unavailable in some sandboxes; skip gracefully.
         let cfg = TcpConfig::default();
-        let listener = match TcpListener::bind(
-            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)),
-            &cfg,
-            128,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("skipping: IPv6 loopback unavailable ({e})");
-                return;
-            }
-        };
+        let listener =
+            match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)), &cfg, 128) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("skipping: IPv6 loopback unavailable ({e})");
+                    return;
+                }
+            };
         let addr = listener.local_addr().unwrap();
         assert!(addr.is_ipv6(), "local addr must be IPv6: {addr}");
         let mut client = std::net::TcpStream::connect(addr).unwrap();
@@ -648,7 +660,10 @@ mod tests {
             }
         };
         let (mut stream, peer) = accept_ready(&listener);
-        assert!(peer.is_ipv4(), "IPv4-mapped peer must present as IPv4: {peer}");
+        assert!(
+            peer.is_ipv4(),
+            "IPv4-mapped peer must present as IPv4: {peer}"
+        );
         stream.write_all(b"ds").unwrap();
         let mut back = [0u8; 2];
         client.read_exact(&mut back).unwrap();
@@ -716,11 +731,8 @@ mod tests {
         // collide on the same path.
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "fds-tcp-splice-{}-{}",
-            std::process::id(),
-            seq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("fds-tcp-splice-{}-{}", std::process::id(), seq));
         std::fs::write(&path, content).unwrap();
         let file = std::fs::File::open(&path).unwrap();
 

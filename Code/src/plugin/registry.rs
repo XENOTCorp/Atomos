@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::error::ServeError;
 #[cfg(feature = "wasm")]
@@ -69,7 +68,6 @@ pub fn load_dir(router: &Router, dir: &Path) -> Result<Vec<String>, ServeError> 
             }
         }
     }
-    let _ = Arc::clone(&router.cfg);
     Ok(loaded)
 }
 
